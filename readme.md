@@ -1,0 +1,23 @@
+[This](https://github.com/vpj/python_autocomplete) a toy project we started to see how well a simple LSTM model can autocomplete python code.
+
+It gives quite decent results by saving above 30% key strokes in most files, and close to 50% in some. We calculated key strokes saved by making a single (best) prediction and selecting it with a single key.
+
+We do a beam search to find predictions, upto ~10 characters ahead. So far it's too inefficient, if you are wondering about editor integration.
+
+We train and predict on after cleaning comments, strings and blank lines in python code.
+The model is trained after tokenizing python code. It seems more efficient than character level prediction with byte-pair encoding.
+
+A saved model is included in this repo. It is trained on [tensorflow/models](https://github.com/tensorflow/models).
+
+## Try it your self
+
+1. Setup [lab](https://github.com/vpj/lab)
+
+2. Copy data to `./data/source`
+
+3. Run `extract_code.py` to collect all python files, encode and merge them into `all.py`
+
+4. Run `evaluate.py` to evaluate the model.
+
+5. Run `train.py` to train the model
+
