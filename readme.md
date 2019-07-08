@@ -15,7 +15,7 @@ Here's a sample evaluation on a source file from validation set. Green character
   <img src="/python-autocomplete.png?raw=true" width="100%" title="Screenshot">
 </p>
 
-## Try it your self
+## Try it yourself
 
 1. Setup [lab](https://github.com/vpj/lab)
 
