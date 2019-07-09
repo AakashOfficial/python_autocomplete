@@ -182,7 +182,7 @@ def main_train():
                           c0=c0,
                           eof=0)
         # Create validator
-        validator = Trainer(files=train_files,
+        validator = Trainer(files=valid_files,
                             model=model,
                             loss_func=loss_func,
                             optimizer=optimizer,
