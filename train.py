@@ -54,15 +54,17 @@ def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, s
     data = []
     last_clean = 0
 
+    eof = np.array([eof], dtype=np.uint8)
+
     for i, f in enumerate(files):
         if len(f.codes) == 0:
             continue
 
         # To make sure data type in int
         if len(data) > 0:
-            data = np.concatenate((data, [eof], f.codes), axis=0)
+            data = np.concatenate((data, eof, f.codes), axis=0)
         else:
-            data = np.concatenate(([eof], f.codes), axis=0)
+            data = np.concatenate((eof, f.codes), axis=0)
         if len(data) <= offset:
             continue
         data = data[offset:]
@@ -91,8 +93,8 @@ def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, s
 
     idx = [batches * i for i in range(batch_size)]
     for i in range(batches):
-        x_batch = np.zeros((batch_size, seq_len), dtype=np.int64)
-        y_batch = np.zeros((batch_size, seq_len), dtype=np.int64)
+        x_batch = np.zeros((batch_size, seq_len), dtype=np.uint8)
+        y_batch = np.zeros((batch_size, seq_len), dtype=np.uint8)
         for j in range(batch_size):
             n = idx[j] // batch_size
             m = idx[j] % batch_size
@@ -144,8 +146,8 @@ class Trainer:
 
     def run(self, i):
         # Get model output
-        x = torch.tensor(self.x[i], device=device)
-        y = torch.tensor(self.y[i], device=device)
+        x = torch.tensor(self.x[i], device=device, dtype=torch.int64)
+        y = torch.tensor(self.y[i], device=device, dtype=torch.int64)
         self.p, logits, (self.hn, self.cn) = self.model(x, self.hn, self.cn)
 
         # Flatten outputs
@@ -303,7 +305,7 @@ def main_train():
     EXPERIMENT.add_models({'base': model})
 
     # Start training scratch (step '0')
-    EXPERIMENT.start_train(0)
+    EXPERIMENT.start_train(True)
 
     # Setup logger indicators
     logger.add_indicator("train_loss", queue_limit=500, is_histogram=True)

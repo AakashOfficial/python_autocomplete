@@ -73,7 +73,7 @@ def load_files() -> List[EncodedFile]:
             if content == '':
                 content = []
             else:
-                content = np.array([int(t) for t in content.split(' ')])
+                content = np.array([int(t) for t in content.split(' ')], dtype=np.uint8)
             files.append(EncodedFile(path, content))
             logger.progress(i + 2)
 
@@ -82,8 +82,8 @@ def load_files() -> List[EncodedFile]:
     return files
 
 
-def split_train_valid(files: List[EncodedFile], is_shuffle=True) -> (
-List[EncodedFile], List[EncodedFile]):
+def split_train_valid(files: List[EncodedFile],
+                      is_shuffle=True) -> (List[EncodedFile], List[EncodedFile]):
     """
     Split training and validation sets
     """
