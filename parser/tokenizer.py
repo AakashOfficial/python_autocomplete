@@ -149,9 +149,9 @@ _PARSERS = [
 ]
 
 VOCAB_SIZE = 0
-DECODE = []
-LENGTHS = []
-DESERIALIZE = []
+DECODE: List[List[str]] = []
+LENGTHS: List[int] = []
+DESERIALIZE: List[ParsedToken] = []
 
 SKIP_TOKENS = {tokenize.ENCODING, tokenize.ENDMARKER}
 EMPTY_TOKENS = {TokenType.eof, TokenType.new_line, TokenType.indent, TokenType.dedent}
