@@ -283,6 +283,7 @@ def main_train():
     lstm_layers = 3
     batch_size = 32
     seq_len = 32
+    is_half = False
 
     with logger.section("Create model"):
         # Create model
@@ -290,16 +291,28 @@ def main_train():
                                 embedding_size=tokenizer.VOCAB_SIZE,
                                 lstm_size=lstm_size,
                                 lstm_layers=lstm_layers)
+
+        # Use half precision
+        if is_half:
+            model.half()
+
         # Move model to `device`
         model.to(device)
 
         # Create loss function and optimizer
         loss_func = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters())
+        if is_half:
+            optimizer = torch.optim.Adam(model.parameters(), eps=1e-5)
+        else:
+            optimizer = torch.optim.Adam(model.parameters())
 
     # Initial state is 0
-    h0 = torch.zeros((lstm_layers, batch_size, lstm_size), device=device)
-    c0 = torch.zeros((lstm_layers, batch_size, lstm_size), device=device)
+    if is_half:
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+    h0 = torch.zeros((lstm_layers, batch_size, lstm_size), device=device, dtype=dtype)
+    c0 = torch.zeros((lstm_layers, batch_size, lstm_size), device=device, dtype=dtype)
 
     # Specify the model in [lab](https://github.com/vpj/lab) for saving and loading
     EXPERIMENT.add_models({'base': model})
