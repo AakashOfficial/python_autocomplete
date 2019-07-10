@@ -1,4 +1,4 @@
-`master` branch is underdevelopment. Checkout `simple_lstm` branch to try it out.
+**`master` branch is underdevelopment. Checkout [simple_lstm](https://github.com/vpj/python_autocomplete/tree/simple_lstm) branch to try it out.
 
 [This](https://github.com/vpj/python_autocomplete) a toy project we started to see how well a simple LSTM model can autocomplete python code.
 
