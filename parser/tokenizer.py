@@ -10,11 +10,13 @@ class TokenType:
     dedent = 3
     op = 4
     keyword = 5
-    name = 6
-    number = 7
-    string = 8
-    string_other = 9
-    comment = 10
+    keyword_1 = 6
+    keyword_2 = 7
+    name = 8
+    number = 9
+    string = 10
+    string_other = 11
+    comment = 12
 
 
 class _MatchType:
@@ -55,32 +57,36 @@ class _TokenParser:
         """
         Parse token
         """
-        if type(self.tokenize_type) == list:
-            if token.type not in self.tokenize_type:
-                return None
-        else:
-            if token.type != self.tokenize_type:
-                return None
+        try:
+            if type(self.tokenize_type) == list:
+                if token.type not in self.tokenize_type:
+                    return None
+            else:
+                if token.type != self.tokenize_type:
+                    return None
 
-        # Perhaps use subclasses?
-        if self.match_type == _MatchType.exact:
-            if token.string not in self.match_set:
+            # Perhaps use subclasses?
+            if self.match_type == _MatchType.exact:
+                if token.string not in self.match_set:
+                    return None
+                return [ParsedToken(self.token_type, self.match_set[token.string])]
+            elif self.match_type == _MatchType.each:
+                res = []
+                for ch in token.string:
+                    res.append(ParsedToken(self.token_type, self.match_set[ch]))
+                return res
+            elif self.match_type == _MatchType.starts:
+                for i, pref in enumerate(self.values):
+                    if token.string.startswith(pref):
+                        return [ParsedToken(self.token_type, i)]
                 return None
-            return [ParsedToken(self.token_type, self.match_set[token.string])]
-        elif self.match_type == _MatchType.each:
-            res = []
-            for ch in token.string:
-                res.append(ParsedToken(self.token_type, self.match_set[ch]))
-            return res
-        elif self.match_type == _MatchType.starts:
-            for i, pref in enumerate(self.values):
-                if token.string.startswith(pref):
-                    return [ParsedToken(self.token_type, i)]
-            return None
-        elif self.match_type == _MatchType.none:
-            return [ParsedToken(self.token_type, 0)]
-        else:
-            raise RuntimeError(self.match_type)
+            elif self.match_type == _MatchType.none:
+                return [ParsedToken(self.token_type, 0)]
+            else:
+                raise RuntimeError(self.match_type)
+        except Exception as e:
+            print(token)
+            raise e
 
     def calc_serialize_range(self):
         for p in _PARSERS:
@@ -103,7 +109,7 @@ _CHARS += [chr(i + ord('a')) for i in range(26)]
 _CHARS += [chr(i + ord('A')) for i in range(26)]
 _CHARS += [chr(i + ord('0')) for i in range(10)]
 
-_NUMS = ['.', '_', 'e', 'x', '-']
+_NUMS = ['.', '_', 'x', 'X', 'o', 'O', '-', '+', 'j', 'J']
 _NUMS += [chr(i + ord('a')) for i in range(6)]
 _NUMS += [chr(i + ord('A')) for i in range(6)]
 _NUMS += [chr(i + ord('0')) for i in range(10)]
@@ -120,7 +126,7 @@ _PARSERS = [
                   '&', '|', '^', '~', '<<', '>>',
                   '&=', '|=', '^=', '~=', '<<=', '>>=',
                   '.', ',', '(', ')', ':', '[', ']', '{', '}',
-                  '@', '...', ';']),
+                  '@', '...', ';', '->']),
     _TokenParser(TokenType.keyword, tokenize.NAME, _MatchType.exact,
                  ['and', 'as', 'assert', 'break', 'class',
                   'continue', 'def', 'del', 'elif', 'else',
@@ -128,6 +134,10 @@ _PARSERS = [
                   'global', 'if', 'import', 'in', 'is', 'lambda',
                   'None', 'nonlocal', 'not', 'or', 'pass', 'raise',
                   'return', 'True', 'try', 'while', 'with', 'yield']),
+    _TokenParser(TokenType.keyword_1, tokenize.ASYNC, _MatchType.exact,
+                 ['async']),
+    _TokenParser(TokenType.keyword_2, tokenize.AWAIT, _MatchType.exact,
+                 ['await']),
     _TokenParser(TokenType.name, tokenize.NAME, _MatchType.each, _CHARS),
     _TokenParser(TokenType.number, tokenize.NUMBER, _MatchType.each, _NUMS),
     _TokenParser(TokenType.string, tokenize.STRING, _MatchType.starts,

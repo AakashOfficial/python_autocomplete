@@ -32,8 +32,6 @@ class _GetPythonFiles:
         self.files: List[_PythonFile] = []
         self.get_python_files(self.source_path)
 
-        _logger.info([f.path for f in self.files])
-
     def add_file(self, path: Path):
         """
         Add a file to the list of tiles
@@ -151,16 +149,22 @@ def _read_file(path: Path) -> List[int]:
 def main():
     source_files = _GetPythonFiles().files
 
-    _logger.info(source_files)
+    _logger.info(files=len(source_files))
 
     with open(str(Path(os.getcwd()) / 'data' / 'all.py'), 'w') as f:
         with _logger.section("Parse", total_steps=len(source_files)):
             for i, source in enumerate(source_files):
-                serialized = _read_file(source.path)
-                # return
+                try:
+                    serialized = _read_file(source.path)
+                except Exception as e:
+                    print(source.path)
+                    print(e)
+                    continue
+
                 serialized = [str(t) for t in serialized]
                 f.write(f"{str(source.path)}\n")
                 f.write(" ".join(serialized) + "\n")
+                f.flush()
                 _logger.progress(i + 1)
 
 
