@@ -15,9 +15,9 @@ from model import SimpleLstmModel
 from parser import tokenizer
 
 # Experiment configuration to load checkpoints
-EXPERIMENT = Experiment(name="simple_lstm",
+EXPERIMENT = Experiment(name="simple_lstm_1000",
                         python_file=__file__,
-                        comment="Simple LSTM",
+                        comment="Simple LSTM All Data",
                         check_repo_dirty=False,
                         is_log_python_file=False)
 
@@ -380,6 +380,20 @@ class Evaluator:
 
                 # If the suggestion doesn't match
                 else:
+                    # Debug
+                    # end = 0
+                    # for i in range(min(len(rest_of_line), len(suggestion))):
+                    #     if rest_of_line[i] != suggestion[i]:
+                    #         end = i
+                    #         break
+                    # if end > 0:
+                    #     new_logs = logs + [(suggestion[:end], colors.Background.green),
+                    #                        (suggestion[end:], colors.BrightColor.red)]
+                    # else:
+                    #     new_logs = logs + [(suggestion[end:], colors.BrightColor.red)]
+                    #
+                    # logger.log_color(new_logs)
+
                     # Add the next character
                     self.__predictor.add(rest_of_line[0])
                     logs.append((rest_of_line[0], None))
@@ -404,7 +418,7 @@ def main():
 
     with logger.section("Loading data"):
         files = parser.load.load_files()
-        train_files, valid_files = parser.load.split_train_valid(files, is_shuffle=False)
+        _, valid_files = parser.load.split_train_valid(files, is_shuffle=False)
 
     with logger.section("Create model"):
         model = SimpleLstmModel(encoding_size=tokenizer.VOCAB_SIZE,

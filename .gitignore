@@ -1,7 +1,8 @@
-data/
+data
 .ipynb_checkpoints/
 .idea/
 __pycache__/
 .DS_Store
 .*.swp
 lab
+logs
