@@ -1,3 +1,5 @@
+`master` branch is underdevelopment. Checkout `simple_lstm` branch to try it out.
+
 [This](https://github.com/vpj/python_autocomplete) a toy project we started to see how well a simple LSTM model can autocomplete python code.
 
 It gives quite decent results by saving above 30% key strokes in most files, and close to 50% in some. We calculated key strokes saved by making a single (best) prediction and selecting it with a single key.
@@ -17,12 +19,14 @@ Here's a sample evaluation on a source file from validation set. Green character
 
 ## Try it yourself
 
-1. Setup [lab](https://github.com/vpj/lab)
+1. Checkout `simple_lstm` branch.
 
-2. Copy data to `./data/source`
+2. Setup [lab](https://github.com/vpj/lab)
 
-3. Run `extract_code.py` to collect all python files, encode and merge them into `all.py`
+3. Copy data to `./data/source`
 
-4. Run `evaluate.py` to evaluate the model.
+4. Run `extract_code.py` to collect all python files, encode and merge them into `all.py`
 
-5. Run `train.py` to train the model
+5. Run `evaluate.py` to evaluate the model.
+
+6. Run `train.py` to train the model
