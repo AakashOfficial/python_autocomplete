@@ -35,6 +35,7 @@ class _TokenParser:
     """
     Parse tokens
     """
+
     def __init__(self, token_type, tokenize_type, match_type, values,
                  replacement=None):
         self.offset = 0
@@ -147,6 +148,11 @@ _PARSERS = [
     # regex etc
     _TokenParser(TokenType.comment, tokenize.COMMENT, _MatchType.none, '#')
 ]
+
+
+def get_vocab_size(token_type: int):
+    return len(_PARSERS[token_type])
+
 
 VOCAB_SIZE = 0
 DECODE: List[List[str]] = []

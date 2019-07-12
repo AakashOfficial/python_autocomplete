@@ -3,6 +3,7 @@ from typing import Dict, Optional, List
 import parser.load
 from lab.logger import Logger
 from parser import tokenizer
+import numpy as np
 
 logger = Logger()
 
@@ -73,6 +74,9 @@ def main():
     # 350128 at least 11 times
 
     # 222994 ids and 532812 numbers
+
+    logger.info(len_id=np.max([len(k) for k in stats.identifiers.keys()]),
+                len_num=np.max([len(k) for k in stats.numbers.keys()]))
 
 
 if __name__ == '__main__':
