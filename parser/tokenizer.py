@@ -154,6 +154,10 @@ def get_vocab_size(token_type: int):
     return len(_PARSERS[token_type])
 
 
+def get_vocab_offset(token_type: int):
+    return _PARSERS[token_type].offset
+
+
 VOCAB_SIZE = 0
 DECODE: List[List[str]] = []
 LENGTHS: List[int] = []

@@ -1,6 +1,6 @@
 import gc
 import math
-from typing import List, Optional, NamedTuple
+from typing import List, Optional, NamedTuple, Dict
 
 import numpy as np
 import torch
@@ -256,6 +256,88 @@ class Model(torch.nn.Module):
         return ModelOutput(decoded_input_logits, probabilities, logits, hn, cn)
 
 
+class IdentifierInfo:
+    count: int
+    offset: int
+    length: int
+
+    def __init__(self, offset, length):
+        self.count = 1
+        self.offset = offset
+        self.length = length
+
+class InputProcessor:
+    def __init__(self):
+        self.identifiers: Dict[str, IdentifierInfo] = {}
+        self.numbers: Dict[str, IdentifierInfo] = {}
+
+        self.identifiers_array = np.array([], dtype=np.uint8)
+        self.numbers_array = np.array([], dtype=np.uint8)
+
+    @staticmethod
+    def _add_to(key: str, arr: np.ndarray,
+                infos: Dict[str, IdentifierInfo],
+                data_arr: np.ndarray):
+        if key in infos:
+            infos[key].length += 1
+            return
+
+        infos[key] = IdentifierInfo(len(data_arr), len(arr))
+
+        return np.concatenate((data_arr, arr), axis=0)
+
+    def add_identifier(self, key: str, arr: List[int]):
+        arr = np.array(arr, dtype=np.uint8)
+        self.identifiers_array = self._add_to(key, arr,
+                                              self.identifiers, self.identifiers_array)
+
+    def add_number(self, key: str, arr: List[int]):
+        arr = np.array(arr, dtype=np.uint8)
+        self.numbers_array = self._add_to(key, arr,
+                                              self.numbers, self.numbers_array)
+
+    def count_file(self, file: parser.load.EncodedFile):
+        identifier: Optional[str] = None
+        number: Optional[str] = None
+
+        # TODO
+        identifier_arr = []
+        number_arr = []
+
+        for c in file.codes:
+            t = tokenizer.DESERIALIZE[c]
+            if t.type != tokenizer.TokenType.name:
+                if identifier is not None:
+                    self.add_identifier(identifier)
+                    identifier = None
+            else:
+                ch = tokenizer.DECODE[c][0]
+                if identifier is None:
+                    identifier = ch
+                else:
+                    identifier += ch
+
+            if t.type != tokenizer.TokenType.number:
+                if number is not None:
+                    self.add_number(number)
+                    number = None
+            else:
+                ch = tokenizer.DECODE[c][0]
+                if number is None:
+                    number = ch
+                else:
+                    number += ch
+
+    def count_files(self, files: List[parser.load.EncodedFile]):
+        with logger.section("Counting", total_steps=len(files)):
+            for i, f in enumerate(files):
+                self.count_file(f)
+                logger.progress(i + 1)
+
+
+
+
+
 def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, seq_len=32):
     """
     Covert raw encoded files into trainin/validation batches
@@ -264,9 +346,16 @@ def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, s
     # Shuffle the order of files
     np.random.shuffle(files)
 
-    # Start from a random offset
-    offset = np.random.randint(seq_len * batch_size)
+    size = np.sum([len(f.codes) + 1 for f in files])
+    size_batches = size // (batch_size + 1)
+    batches = None
 
+    file_idx = 0
+    code_idx = 0
+    current_size = 0
+    current_batches = 0
+
+    for b in range(batch_size):
     x_unordered = []
     y_unordered = []
 
