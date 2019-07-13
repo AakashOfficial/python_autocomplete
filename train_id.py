@@ -1,4 +1,10 @@
-import gc
+"""
+This is still work in progress
+
+TODO: This code is hacked together to try things fast.
+TODO: Needs refactoring and cleaning up.
+"""
+
 import math
 from typing import List, Optional, NamedTuple, Dict
 
@@ -7,14 +13,15 @@ import torch
 import torch.nn
 
 import parser.load
+from parser.load import EncodedFile
 from lab.experiment.pytorch import Experiment
 from parser import tokenizer
 
 # Configure the experiment
 
-EXPERIMENT = Experiment(name="simple_lstm_1000",
+EXPERIMENT = Experiment(name="id_embeddings",
                         python_file=__file__,
-                        comment="Simple LSTM All Data",
+                        comment="With ID embeddings",
                         check_repo_dirty=False,
                         is_log_python_file=False)
 
@@ -23,6 +30,38 @@ logger = EXPERIMENT.logger
 # device to train on
 device = torch.device("cuda:1")
 cpu = torch.device("cpu")
+
+TYPE_MASK_BASE = 1 << 20
+
+
+class Batch(NamedTuple):
+    x: np.ndarray
+    y: np.ndarray
+    type_mask: np.ndarray
+    ids: np.ndarray
+    nums: np.ndarray
+    tokens: np.ndarray
+
+
+class ModelOutput(NamedTuple):
+    decoded_input_logits: torch.Tensor
+    probabilities: torch.Tensor
+    logits: torch.Tensor
+    hn: torch.Tensor
+    cn: torch.Tensor
+
+
+class IdentifierInfo:
+    code: int
+    count: int
+    offset: int
+    length: int
+
+    def __init__(self, code, offset, length):
+        self.code = code
+        self.count = 1
+        self.offset = offset
+        self.length = length
 
 
 class LstmEncoder(torch.nn.Module):
@@ -175,6 +214,10 @@ class Model(torch.nn.Module):
 
             return res
 
+    @property
+    def device(self):
+        return self.output_fc.weight.device
+
     def init_state(self, batch_size):
         h0 = torch.zeros((self.lstm.num_layers, batch_size, self.lstm.hidden_size),
                          device=self.device)
@@ -208,7 +251,7 @@ class Model(torch.nn.Module):
 
         x_embeddings = torch.zeros((batch_size * seq_len, embedding_size), device=self.device)
         for i in range(len(embeddings)):
-            x_embeddings += type_mask[:, i] * embeddings[i].index_select(dim=0, index=x)
+            x_embeddings += type_mask[:, i] * embeddings[i].index_select(dim=0, index=x * type_mask[i])
 
         x_embeddings = x_embeddings.reshape((batch_size, seq_len, embedding_size))
 
@@ -256,106 +299,122 @@ class Model(torch.nn.Module):
         return ModelOutput(decoded_input_logits, probabilities, logits, hn, cn)
 
 
-class IdentifierInfo:
-    count: int
-    offset: int
-    length: int
-
-    def __init__(self, offset, length):
-        self.count = 1
-        self.offset = offset
-        self.length = length
-
 class InputProcessor:
+    """
+    TODO: We should do this at tokenizer level
+    """
+
     def __init__(self):
-        self.identifiers: Dict[str, IdentifierInfo] = {}
-        self.numbers: Dict[str, IdentifierInfo] = {}
+        self.infos: List[List[IdentifierInfo]] = [[], []]
+        self.dictionaries: List[Dict[str, int]] = [{} for _ in self.infos]
+        self.arrays: List[np.ndarray] = [np.array([], dtype=np.uint8) for _ in self.infos]
+        self.counts: List[int] = [0 for _ in self.infos]
 
-        self.identifiers_array = np.array([], dtype=np.uint8)
-        self.numbers_array = np.array([], dtype=np.uint8)
+    def add_to(self, type_idx: int, key: str, arr: np.ndarray):
+        idx = self.dictionaries[type_idx]
+        infos: List[IdentifierInfo] = self.infos[type_idx]
+        data_array = self.arrays[type_idx]
 
-    @staticmethod
-    def _add_to(key: str, arr: np.ndarray,
-                infos: Dict[str, IdentifierInfo],
-                data_arr: np.ndarray):
-        if key in infos:
-            infos[key].length += 1
+        if key in idx:
+            infos[idx[key]].length += 1
             return
 
-        infos[key] = IdentifierInfo(len(data_arr), len(arr))
+        idx[key] = len(infos)
+        infos.append(IdentifierInfo(len(infos), len(data_array), len(arr)))
 
-        return np.concatenate((data_arr, arr), axis=0)
+        self.arrays[type_idx] = np.concatenate((data_array, arr), axis=0)
 
-    def add_identifier(self, key: str, arr: List[int]):
-        arr = np.array(arr, dtype=np.uint8)
-        self.identifiers_array = self._add_to(key, arr,
-                                              self.identifiers, self.identifiers_array)
-
-    def add_number(self, key: str, arr: List[int]):
-        arr = np.array(arr, dtype=np.uint8)
-        self.numbers_array = self._add_to(key, arr,
-                                              self.numbers, self.numbers_array)
-
-    def count_file(self, file: parser.load.EncodedFile):
-        identifier: Optional[str] = None
-        number: Optional[str] = None
-
-        # TODO
-        identifier_arr = []
-        number_arr = []
+    def gather_file(self, file: parser.load.EncodedFile):
+        types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
+        offsets: List[int] = [tokenizer.get_vocab_offset(t) for t in types]
+        strings: List[Optional[str]] = [None for _ in types]
+        arrays: List[List[int]] = [[] for _ in types]
 
         for c in file.codes:
             t = tokenizer.DESERIALIZE[c]
-            if t.type != tokenizer.TokenType.name:
-                if identifier is not None:
-                    self.add_identifier(identifier)
-                    identifier = None
-            else:
-                ch = tokenizer.DECODE[c][0]
-                if identifier is None:
-                    identifier = ch
+            for type_idx, token_type in enumerate(types):
+                if t.type != token_type:
+                    if strings[type_idx] is not None:
+                        self.add_to(type_idx, strings[type_idx],
+                                    np.array(arrays[type_idx], dtype=np.uint8))
+                        strings[type_idx] = None
+                        arrays[type_idx] = []
                 else:
-                    identifier += ch
+                    ch = tokenizer.DECODE[c][0]
+                    # add one because 0 is for padding
+                    arrays[type_idx].append(c + 1 - offsets[type_idx])
+                    if strings[type_idx] is None:
+                        strings[type_idx] = ch
+                    else:
+                        strings[type_idx] += ch
 
-            if t.type != tokenizer.TokenType.number:
-                if number is not None:
-                    self.add_number(number)
-                    number = None
-            else:
-                ch = tokenizer.DECODE[c][0]
-                if number is None:
-                    number = ch
-                else:
-                    number += ch
-
-    def count_files(self, files: List[parser.load.EncodedFile]):
+    def gather_files(self, files: List[parser.load.EncodedFile]):
         with logger.section("Counting", total_steps=len(files)):
             for i, f in enumerate(files):
-                self.count_file(f)
+                self.gather_file(f)
                 logger.progress(i + 1)
 
+    def transform_file(self, file: EncodedFile):
+        types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
+        offsets: List[int] = [tokenizer.get_vocab_offset(t) for t in types]
+        strings: List[Optional[str]] = [None for _ in types]
 
+        type_mask = []
+        codes = []
 
+        for c in file.codes:
+            t = tokenizer.DESERIALIZE[c]
+            skip = False
+            for type_idx, token_type in enumerate(types):
+                if t.type != token_type:
+                    if strings[type_idx] is not None:
+                        type_mask.append(type_idx + 1)
+                        idx = self.dictionaries[type_idx][strings[type_idx]]
+                        codes.append(self.infos[type_idx][idx].code)
+                        strings[type_idx] = None
+                else:
+                    ch = tokenizer.DECODE[c][0]
+                    # add one because 0 is for padding
+                    if strings[type_idx] is None:
+                        strings[type_idx] = ch
+                    else:
+                        strings[type_idx] += ch
+
+                    skip = True
+
+            if skip:
+                continue
+
+            type_mask.append(0)
+            codes.append(c)
+
+        codes = np.array(codes, dtype=np.uint32)
+        type_mask = np.array(type_mask, dtype=np.uint32)
+        codes = type_mask * TYPE_MASK_BASE + codes
+
+        return EncodedFile(file.path, codes)
+
+    def transform_files(self, files: List[parser.load.EncodedFile]) -> List[EncodedFile]:
+        transformed = []
+        with logger.section("Transforming", total_steps=len(files)):
+            for i, f in enumerate(files):
+                transformed.append(self.transform_file(f))
+                logger.progress(i + 1)
+
+        return transformed
 
 
 def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, seq_len=32):
     """
-    Covert raw encoded files into trainin/validation batches
+    Covert raw encoded files into training/validation batches
     """
 
     # Shuffle the order of files
     np.random.shuffle(files)
 
-    size = np.sum([len(f.codes) + 1 for f in files])
-    size_batches = size // (batch_size + 1)
-    batches = None
+    # Start from a random offset
+    offset = np.random.randint(seq_len * batch_size)
 
-    file_idx = 0
-    code_idx = 0
-    current_size = 0
-    current_batches = 0
-
-    for b in range(batch_size):
     x_unordered = []
     y_unordered = []
 
@@ -363,7 +422,7 @@ def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, s
     data = []
     last_clean = 0
 
-    eof = np.array([eof], dtype=np.uint8)
+    eof = np.array([eof], dtype=np.uint32)
 
     for i, f in enumerate(files):
         if len(f.codes) == 0:
@@ -402,8 +461,8 @@ def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, s
 
     idx = [batches * i for i in range(batch_size)]
     for i in range(batches):
-        x_batch = np.zeros((batch_size, seq_len), dtype=np.uint8)
-        y_batch = np.zeros((batch_size, seq_len), dtype=np.uint8)
+        x_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
+        y_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
         for j in range(batch_size):
             n = idx[j] // batch_size
             m = idx[j] % batch_size
@@ -422,21 +481,39 @@ def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, s
     return x, y
 
 
-class Batch(NamedTuple):
-    x: np.ndarray
-    y: np.ndarray
-    type_mask: np.ndarray
-    ids: np.ndarray
-    nums: np.ndarray
-    tokens: np.ndarray
+def build_batch(x_source: np.ndarray, y_source: np.ndarray,
+                type_infos: List[List[IdentifierInfo]]):
+    batch_size, seq_len = x_source.shape
+    sets = [set() for _ in range(len(type_infos) + 1)]
+
+    for b in range(batch_size):
+        for s in range(seq_len):
+            type_idx = x_source[b, s] // TYPE_MASK_BASE
+            c = x_source[b, s] % TYPE_MASK_BASE
+            sets[type_idx].add(c)
+
+            type_idx = y_source[b, s] // TYPE_MASK_BASE
+            c = y_source[b, s] % TYPE_MASK_BASE
+            sets[type_idx].add(c)
+
+    # TODO: add 128 most popular tokens
+    # replace 0 tokens (base tokens) with VOCAB_SIZE
+    # build token data arrays
+    # token data arrays can be of different sizes
+    return [len(s) for s in sets]
 
 
-class ModelOutput(NamedTuple):
-    decoded_input_logits: torch.Tensor
-    probabilities: torch.Tensor
-    logits: torch.Tensor
-    hn: torch.Tensor
-    cn: torch.Tensor
+def build_batches(x: List[np.ndarray],
+                  y: List[np.ndarray],
+                  type_infos: List[List[IdentifierInfo]]):
+    n_batches = len(x)
+
+    batches = []
+    for b in range(n_batches):
+        batches.append(build_batch(x[b], y[b], type_infos))
+
+    batches = np.array(batches)
+    return batches
 
 
 class Trainer:
@@ -445,6 +522,7 @@ class Trainer:
     """
 
     def __init__(self, *, files: List[parser.load.EncodedFile],
+                 input_processor: InputProcessor,
                  model: Model,
                  loss_func, encoder_decoder_loss_funcs, optimizer,
                  eof: int,
@@ -452,9 +530,11 @@ class Trainer:
                  is_train: bool,
                  h0, c0):
         # Get batches
-        self.batches: List[Batch] = get_batches(files, eof,
-                                                batch_size=batch_size,
-                                                seq_len=seq_len)
+        x, y = get_batches(files, eof,
+                           batch_size=batch_size,
+                           seq_len=seq_len)
+
+        batches = build_batches(x, y, input_processor.infos)
         del files
 
         # Initial state
@@ -530,6 +610,11 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
         # Load all python files
         files = parser.load.load_files()
 
+    # Transform files
+    processor = InputProcessor()
+    processor.gather_files(files)
+    files = processor.transform_files(files)
+
     with logger.section("Split training and validation"):
         # Split training and validation data
         train_files, valid_files = parser.load.split_train_valid(files, is_shuffle=False)
@@ -540,6 +625,7 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
     # Create trainer
     with logger.section("Create trainer"):
         trainer = Trainer(files=train_files,
+                          input_processor=processor,
                           model=model,
                           loss_func=loss_func,
                           encoder_decoder_loss_funcs=encoder_decoder_loss_funcs,
@@ -556,6 +642,7 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
     # Create validator
     with logger.section("Create validator"):
         validator = Trainer(files=valid_files,
+                            input_processor=processor,
                             model=model,
                             loss_func=loss_func,
                             encoder_decoder_loss_funcs=encoder_decoder_loss_funcs,
@@ -637,7 +724,7 @@ def run_epoch(epoch, model,
     return True
 
 
-def main_train():
+def main():
     batch_size = 32
     seq_len = 32
 
@@ -708,4 +795,4 @@ def main_train():
 
 
 if __name__ == '__main__':
-    main_train()
+    main()
