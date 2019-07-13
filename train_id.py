@@ -228,12 +228,13 @@ class Model(torch.nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                type_mask: torch.Tensor,
+                x_type: torch.Tensor,
                 ids: torch.Tensor,
                 nums: torch.Tensor,
                 tokens: torch.Tensor,
                 h0: torch.Tensor,
                 c0: torch.Tensor,
+                y_type: Optional[torch.Tensor],
                 y: Optional[torch.Tensor]):
         encoders = [self.encode_ids, self.encode_nums, self.encode_tokens]
         decoders = [self.decode_ids, self.decode_nums, self.decode_tokens]
@@ -247,11 +248,13 @@ class Model(torch.nn.Module):
         n_embeddings, embedding_size = embeddings[0].shape
         batch_size, seq_len = x.shape
         x = x.reshape(-1)
-        type_mask = type_mask.reshape(-1, len(embeddings))
+        x_type = x_type.reshape(-1, len(embeddings))
 
         x_embeddings = torch.zeros((batch_size * seq_len, embedding_size), device=self.device)
         for i in range(len(embeddings)):
-            x_embeddings += type_mask[:, i] * embeddings[i].index_select(dim=0, index=x * type_mask[i])
+            type_mask = x_type == i
+            x_embeddings += type_mask * embeddings[i].index_select(dim=0,
+                                                                   index=x * type_mask)
 
         x_embeddings = x_embeddings.reshape((batch_size, seq_len, embedding_size))
 
@@ -271,8 +274,8 @@ class Model(torch.nn.Module):
                                                                         decoded_prediction)
         if y is not None:
             for i in range(batch_size):
-                t = y[i] // n_embeddings
-                n = y[i] % n_embeddings
+                t: int = y_type[i]
+                n: int = y[i]
                 for j in range(n_inputs):
                     if j != t:
                         embedding_prediction[j][i] *= 0.
@@ -356,7 +359,6 @@ class InputProcessor:
 
     def transform_file(self, file: EncodedFile):
         types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
-        offsets: List[int] = [tokenizer.get_vocab_offset(t) for t in types]
         strings: List[Optional[str]] = [None for _ in types]
 
         type_mask = []
@@ -404,116 +406,124 @@ class InputProcessor:
         return transformed
 
 
-def get_batches(files: List[parser.load.EncodedFile], eof: int, batch_size=32, seq_len=32):
-    """
-    Covert raw encoded files into training/validation batches
-    """
+class BatchBuilder:
+    def __init__(self, input_processor: InputProcessor):
+        self.input_processor = input_processor
 
-    # Shuffle the order of files
-    np.random.shuffle(files)
+    @staticmethod
+    def get_batches(files: List[parser.load.EncodedFile],
+                    eof: int, batch_size=32, seq_len=32):
+        """
+        Covert raw encoded files into training/validation batches
+        """
 
-    # Start from a random offset
-    offset = np.random.randint(seq_len * batch_size)
+        # Shuffle the order of files
+        np.random.shuffle(files)
 
-    x_unordered = []
-    y_unordered = []
+        # Start from a random offset
+        offset = np.random.randint(seq_len * batch_size)
 
-    # Concatenate all the files whilst adding `eof` marker at the beginnings
-    data = []
-    last_clean = 0
+        x_unordered = []
+        y_unordered = []
 
-    eof = np.array([eof], dtype=np.uint32)
+        # Concatenate all the files whilst adding `eof` marker at the beginnings
+        data = []
+        last_clean = 0
 
-    for i, f in enumerate(files):
-        if len(f.codes) == 0:
-            continue
+        eof = np.array([eof], dtype=np.uint32)
 
-        # To make sure data type in int
-        if len(data) > 0:
-            data = np.concatenate((data, eof, f.codes), axis=0)
-        else:
-            data = np.concatenate((eof, f.codes), axis=0)
-        if len(data) <= offset:
-            continue
-        data = data[offset:]
-        offset = 0
+        for i, f in enumerate(files):
+            if len(f.codes) == 0:
+                continue
 
-        while len(data) >= batch_size * seq_len + 1:
-            x_batch = data[:(batch_size * seq_len)]
-            data = data[1:]
-            y_batch = data[:(batch_size * seq_len)]
-            data = data[(batch_size * seq_len):]
-            if i - last_clean > 100:
-                data = np.copy(data)
-                last_clean = i
+            # To make sure data type in int
+            if len(data) > 0:
+                data = np.concatenate((data, eof, f.codes), axis=0)
+            else:
+                data = np.concatenate((eof, f.codes), axis=0)
+            if len(data) <= offset:
+                continue
+            data = data[offset:]
+            offset = 0
 
-            x_batch = np.reshape(x_batch, (batch_size, seq_len))
-            y_batch = np.reshape(y_batch, (batch_size, seq_len))
-            x_unordered.append(x_batch)
-            y_unordered.append(y_batch)
+            while len(data) >= batch_size * seq_len + 1:
+                x_batch = data[:(batch_size * seq_len)]
+                data = data[1:]
+                y_batch = data[:(batch_size * seq_len)]
+                data = data[(batch_size * seq_len):]
+                if i - last_clean > 100:
+                    data = np.copy(data)
+                    last_clean = i
 
-    del files
-    del data
+                x_batch = np.reshape(x_batch, (batch_size, seq_len))
+                y_batch = np.reshape(y_batch, (batch_size, seq_len))
+                x_unordered.append(x_batch)
+                y_unordered.append(y_batch)
 
-    batches = len(x_unordered)
-    x = []
-    y = []
+        del files
+        del data
 
-    idx = [batches * i for i in range(batch_size)]
-    for i in range(batches):
-        x_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
-        y_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
-        for j in range(batch_size):
-            n = idx[j] // batch_size
-            m = idx[j] % batch_size
-            idx[j] += 1
-            x_batch[j, :] = x_unordered[n][m, :]
-            y_batch[j, :] = y_unordered[n][m, :]
+        batches = len(x_unordered)
+        x = []
+        y = []
 
-        x_batch = np.transpose(x_batch, (1, 0))
-        y_batch = np.transpose(y_batch, (1, 0))
-        x.append(x_batch)
-        y.append(y_batch)
+        idx = [batches * i for i in range(batch_size)]
+        for i in range(batches):
+            x_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
+            y_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
+            for j in range(batch_size):
+                n = idx[j] // batch_size
+                m = idx[j] % batch_size
+                idx[j] += 1
+                x_batch[j, :] = x_unordered[n][m, :]
+                y_batch[j, :] = y_unordered[n][m, :]
 
-    del x_unordered
-    del y_unordered
+            x_batch = np.transpose(x_batch, (1, 0))
+            y_batch = np.transpose(y_batch, (1, 0))
+            x.append(x_batch)
+            y.append(y_batch)
 
-    return x, y
+        del x_unordered
+        del y_unordered
 
+        return x, y
 
-def build_batch(x_source: np.ndarray, y_source: np.ndarray,
-                type_infos: List[List[IdentifierInfo]]):
-    batch_size, seq_len = x_source.shape
-    sets = [set() for _ in range(len(type_infos) + 1)]
+    def create_token_array(self, token_type: int, length: int, tokens: list):
+        infos = self.input_processor.infos[token_type]
+        data_array = self.input_processor.arrays[token_type]
+        return np.zeros((len(tokens), length), dtype=np.uint8)
 
-    for b in range(batch_size):
-        for s in range(seq_len):
-            type_idx = x_source[b, s] // TYPE_MASK_BASE
-            c = x_source[b, s] % TYPE_MASK_BASE
-            sets[type_idx].add(c)
+    def build_batch(self, x_source: np.ndarray, y_source: np.ndarray):
+        type_infos = self.input_processor.infos
 
-            type_idx = y_source[b, s] // TYPE_MASK_BASE
-            c = y_source[b, s] % TYPE_MASK_BASE
-            sets[type_idx].add(c)
+        batch_size, seq_len = x_source.shape
+        sets = [set() for _ in range(len(type_infos) + 1)]
 
-    # TODO: add 128 most popular tokens
-    # replace 0 tokens (base tokens) with VOCAB_SIZE
-    # build token data arrays
-    # token data arrays can be of different sizes
-    return [len(s) for s in sets]
+        for b in range(batch_size):
+            for s in range(seq_len):
+                type_idx = x_source[b, s] // TYPE_MASK_BASE
+                c = x_source[b, s] % TYPE_MASK_BASE
+                sets[type_idx].add(c)
 
+                type_idx = y_source[b, s] // TYPE_MASK_BASE
+                c = y_source[b, s] % TYPE_MASK_BASE
+                sets[type_idx].add(c)
 
-def build_batches(x: List[np.ndarray],
-                  y: List[np.ndarray],
-                  type_infos: List[List[IdentifierInfo]]):
-    n_batches = len(x)
+        # TODO: add 128 most popular tokens
+        # replace 0 tokens (base tokens) with VOCAB_SIZE
+        # build token data arrays
+        # token data arrays can be of different sizes
+        return [len(s) for s in sets]
 
-    batches = []
-    for b in range(n_batches):
-        batches.append(build_batch(x[b], y[b], type_infos))
+    def build_batches(self, x: List[np.ndarray], y: List[np.ndarray]):
+        n_batches = len(x)
 
-    batches = np.array(batches)
-    return batches
+        batches = []
+        for b in range(n_batches):
+            batches.append(self.build_batch(x[b], y[b]))
+
+        batches = np.array(batches)
+        return batches
 
 
 class Trainer:
@@ -530,11 +540,13 @@ class Trainer:
                  is_train: bool,
                  h0, c0):
         # Get batches
-        x, y = get_batches(files, eof,
-                           batch_size=batch_size,
-                           seq_len=seq_len)
+        builder = BatchBuilder(input_processor)
 
-        batches = build_batches(x, y, input_processor.infos)
+        x, y = builder.get_batches(files, eof,
+                                   batch_size=batch_size,
+                                   seq_len=seq_len)
+
+        self.batches = builder.build_batches(x, y)
         del files
 
         # Initial state
@@ -684,13 +696,13 @@ def run_epoch(epoch, model,
         logger.set_global_step(global_step)
 
         # Last batch to train and validate
-        train_batch_limit = len(trainer.x) * min(1., (i + 1) / steps_per_epoch)
-        valid_batch_limit = len(validator.x) * min(1., (i + 1) / steps_per_epoch)
+        train_batch_limit = len(trainer.batches) * min(1., (i + 1) / steps_per_epoch)
+        valid_batch_limit = len(validator.batches) * min(1., (i + 1) / steps_per_epoch)
 
         try:
             with logger.delayed_keyboard_interrupt():
 
-                with logger.section("train", total_steps=len(trainer.x), is_partial=True):
+                with logger.section("train", total_steps=len(trainer.batches), is_partial=True):
                     model.train()
                     # Train
                     while train_batch < train_batch_limit:
@@ -698,7 +710,7 @@ def run_epoch(epoch, model,
                         logger.progress(train_batch + 1)
                         train_batch += 1
 
-                with logger.section("valid", total_steps=len(validator.x), is_partial=True):
+                with logger.section("valid", total_steps=len(validator.batches), is_partial=True):
                     model.eval()
                     # Validate
                     while valid_batch < valid_batch_limit:
