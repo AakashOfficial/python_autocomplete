@@ -37,10 +37,12 @@ TYPE_MASK_BASE = 1 << 20
 class Batch(NamedTuple):
     x: np.ndarray
     y: np.ndarray
-    type_mask: np.ndarray
+    x_type: np.ndarray
+    y_type: np.ndarray
+    y_idx: np.ndarray
+    tokens: np.ndarray
     ids: np.ndarray
     nums: np.ndarray
-    tokens: np.ndarray
 
 
 class ModelOutput(NamedTuple):
@@ -56,12 +58,14 @@ class IdentifierInfo:
     count: int
     offset: int
     length: int
+    string: str
 
-    def __init__(self, code, offset, length):
+    def __init__(self, code, offset, length, string):
         self.code = code
         self.count = 1
         self.offset = offset
         self.length = length
+        self.string = string
 
 
 class LstmEncoder(torch.nn.Module):
@@ -82,11 +86,23 @@ class LstmEncoder(torch.nn.Module):
                                   num_layers=lstm_layers)
         self.output_fc = torch.nn.Linear(2 * lstm_size * lstm_layers, encoding_size)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         # shape of x is [seq, batch, feat]
-        batch_size, seq_len = x.shape[0]
+        if len(x.shape) == 2:
+            batch_size, seq_len = x.shape
+            x = x.transpose(0, 1)
+            x = self.embedding(x)
+        else:
+            batch_size, seq_len, _ = x.shape
+            x = x.transpose(0, 1)
 
-        x = self.embedding(x)
+            weights = self.embedding.weight
+            x = torch.matmul(x, weights)
+            # x = x.unsqueeze(-1)
+            # while weights.dim() < x.dim():
+            #     weights = weights.unsqueeze(0)
+            # x = x * weights
+            # x = torch.sum(x, dim=-2)
 
         h0 = self.h0.expand(-1, batch_size, -1).contiguous()
         c0 = self.c0.expand(-1, batch_size, -1).contiguous()
@@ -95,7 +111,7 @@ class LstmEncoder(torch.nn.Module):
         state = torch.cat((hn, cn), dim=2)
         state.transpose_(0, 1)
         state = state.reshape(batch_size, -1)
-        encoding = self.fc(state)
+        encoding = self.output_fc(state)
 
         return encoding
 
@@ -108,7 +124,7 @@ class LstmDecoder(torch.nn.Module):
                  encoding_size):
         super().__init__()
 
-        self.input_fx = torch.nn.Linear(encoding_size, 2 * lstm_size * lstm_layers)
+        self.input_fc = torch.nn.Linear(encoding_size, 2 * lstm_size * lstm_layers)
         self.lstm = torch.nn.LSTM(input_size=vocab_size,
                                   hidden_size=lstm_size,
                                   num_layers=lstm_layers)
@@ -116,28 +132,37 @@ class LstmDecoder(torch.nn.Module):
         self.softmax = torch.nn.Softmax(dim=-1)
         self.length = 0
 
+    @property
+    def device(self):
+        return self.output_fc.weight.device
+
     def forward(self, encoding: torch.Tensor):
         # shape of x is [seq, batch, feat]
         batch_size, encoding_size = encoding.shape
+        encoding = self.input_fc(encoding)
         encoding = encoding.reshape(batch_size, self.lstm.num_layers, 2 * self.lstm.hidden_size)
         encoding.transpose_(0, 1)
         h0 = encoding[:, :, :self.lstm.hidden_size]
-        c0 = encoding[:, :, self.lstm.hidden_size]
-        x = torch.zeros((batch_size, self.lstm.input_size), device=self.device)
-        x[:, 0] = 1.
+        c0 = encoding[:, :, self.lstm.hidden_size:]
+        x = torch.zeros((1, batch_size, self.lstm.input_size), device=self.device)
+        x[:, :, 0] = 1.
+        h0 = h0.contiguous()
+        c0 = c0.contiguous()
 
         decoded = []
         decoded_logits = []
         for i in range(self.length):
             out, (h0, c0) = self.lstm(x, (h0, c0))
-            logits = self.output_fc(out)
-            decoded_logits.append(logits)
+            logits: torch.Tensor = self.output_fc(out)
+            decoded_logits.append(logits.squeeze(0))
             probs = self.softmax(logits)
-            decoded.append(probs)
+            decoded.append(probs.squeeze(0))
             x = probs
 
         decoded = torch.stack(decoded, dim=0)
+        decoded.transpose_(0, 1)
         decoded_logits = torch.stack(decoded_logits, dim=0)
+        decoded_logits.transpose_(0, 1)
 
         return decoded, decoded_logits
 
@@ -149,8 +174,19 @@ class EmbeddingsEncoder(torch.nn.Module):
 
         self.embedding = embedding
 
-    def forward(self, x):
-        return self.embedding(x)
+    def forward(self, x: torch.Tensor):
+        if x.shape[1] == 1:
+            return self.embedding(x.view(-1))
+        else:
+            weights = self.embedding.weight
+            return torch.matmul(x, weights)
+            # x = x.unsqueeze(-1)
+            # while weights.dim() < x.dim():
+            #     weights = weights.unsqueeze(0)
+            # value = x * weights
+            # value = torch.sum(value, dim=-2)
+            #
+            # return value
 
 
 class EmbeddingsDecoder(torch.nn.Module):
@@ -162,18 +198,20 @@ class EmbeddingsDecoder(torch.nn.Module):
         self.softmax = torch.nn.Softmax(dim=-1)
 
     def forward(self, x: torch.Tensor):
-        x = x.unsqueeze(-2)
         weights = self.embedding.weight
-        while weights.dim() < x.dim():
-            weights = weights.unsqueeze(0)
 
-        logits = x * weights
-        logits = torch.sum(logits, dim=-1)
+        logits = torch.matmul(x, weights.transpose(0, 1))
+        # x = x.unsqueeze(-2)
+        # while weights.dim() < x.dim():
+        #     weights = weights.unsqueeze(0)
+        #
+        # logits = x * weights
+        # logits = torch.sum(logits, dim=-1)
 
         return self.softmax(logits), logits
 
 
-MAX_LENGTH = [80, 25, 1]
+MAX_LENGTH = [1, 80, 25]
 
 
 class Model(torch.nn.Module):
@@ -188,7 +226,7 @@ class Model(torch.nn.Module):
                  lstm_size: int,
                  lstm_layers: int):
         super().__init__()
-        self.encode_ids = encoder_ids
+        self.encoder_ids = encoder_ids
         self.encoder_nums = encoder_nums
         self.encoder_tokens = encoder_tokens
         self.decoder_ids = decoder_ids
@@ -209,8 +247,9 @@ class Model(torch.nn.Module):
             res = [[None for _ in range(len(values))] for _ in range(n_outputs)]
             for i in range(len(values)):
                 out = funcs[i](values[i])
+                assert len(out) == n_outputs
                 for j in range(n_outputs):
-                    res[j][i] = out
+                    res[j][i] = out[j]
 
             return res
 
@@ -228,35 +267,36 @@ class Model(torch.nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
+                y: torch.Tensor,
                 x_type: torch.Tensor,
+                y_type: torch.Tensor,
+                tokens: torch.Tensor,
                 ids: torch.Tensor,
                 nums: torch.Tensor,
-                tokens: torch.Tensor,
                 h0: torch.Tensor,
-                c0: torch.Tensor,
-                y_type: Optional[torch.Tensor],
-                y: Optional[torch.Tensor]):
-        encoders = [self.encode_ids, self.encode_nums, self.encode_tokens]
-        decoders = [self.decode_ids, self.decode_nums, self.decode_tokens]
+                c0: torch.Tensor):
+        encoders = [self.encoder_tokens, self.encoder_ids, self.encoder_nums]
+        decoders = [self.decoder_tokens, self.decoder_ids, self.decoder_nums]
         for i, d in enumerate(decoders):
             d.length = MAX_LENGTH[i]
 
-        inputs = [ids, nums, tokens]
+        inputs = [tokens, ids, nums]
         n_inputs = len(inputs)
         embeddings: List[torch.Tensor] = self.apply_transform(encoders, inputs)
 
         n_embeddings, embedding_size = embeddings[0].shape
-        batch_size, seq_len = x.shape
+        seq_len, batch_size = x.shape
         x = x.reshape(-1)
-        x_type = x_type.reshape(-1, len(embeddings))
+        x_type = x_type.reshape(-1)
 
         x_embeddings = torch.zeros((batch_size * seq_len, embedding_size), device=self.device)
         for i in range(len(embeddings)):
             type_mask = x_type == i
-            x_embeddings += type_mask * embeddings[i].index_select(dim=0,
-                                                                   index=x * type_mask)
+            type_mask = type_mask.to(dtype=torch.int64)
+            emb = embeddings[i].index_select(dim=0, index=x * type_mask)
+            x_embeddings += type_mask.view(-1, 1).to(dtype=torch.float32) * emb
 
-        x_embeddings = x_embeddings.reshape((batch_size, seq_len, embedding_size))
+        x_embeddings = x_embeddings.reshape((seq_len, batch_size, embedding_size))
 
         out, (hn, cn) = self.lstm(x_embeddings, (h0, c0))
         prediction_embeddings = self.output_fc(out)
@@ -264,38 +304,39 @@ class Model(torch.nn.Module):
         # Reversed inputs
         decoded_inputs, decoded_input_logits = self.apply_transform(decoders, embeddings, 2)
         embeddings_cycle: List[torch.Tensor] = self.apply_transform(encoders, decoded_inputs)
-        softmax_masks = [(decoded_inputs[i] != inputs[i]).max(dim=1, keepdim=True) for i in
-                         range(n_inputs)]
-        embeddings_cycle = [embeddings_cycle[i] * softmax_masks[i] for i in range(n_inputs)]
+
+        # softmax_masks = [(decoded_inputs[i] != inputs[i]).max(dim=1, keepdim=True) for i in
+        #                  range(n_inputs)]
+        # embeddings_cycle = [embeddings_cycle[i] * softmax_masks[i] for i in range(n_inputs)]
 
         # Reversed prediction
-        decoded_prediction, _ = self.apply_transform(decoders, prediction_embeddings, 2)
-        embedding_prediction: List[torch.Tensor] = self.apply_transform(encoders,
-                                                                        decoded_prediction)
-        if y is not None:
-            for i in range(batch_size):
-                t: int = y_type[i]
-                n: int = y[i]
-                for j in range(n_inputs):
-                    if j != t:
-                        embedding_prediction[j][i] *= 0.
-                if inputs[t][n] == decoded_prediction[t][i]:
-                    embedding_prediction[t][i] *= 0.
+        # decoded_prediction, _ = self.apply_transform(decoders, prediction_embeddings, 2)
+        # embedding_prediction: List[torch.Tensor] = self.apply_transform(encoders,
+        #                                                                 decoded_prediction)
+        # if y is not None:
+        #     for i in range(n_inputs):
+        #         embedding_prediction[j] *= (y_type == i)
+        #     # TODO zero out if decoded_prediction is same as inputs[y]
+        #     for i in range(batch_size):
+        #         t: int = y_type[i]
+        #         n: int = y[i]
+        #         for j in range(n_inputs):
+        #             if j != t:
+        #                 embedding_prediction[j][i] *= 0.
+        #         if inputs[t][n] == decoded_prediction[t][i]:
+        #             embedding_prediction[t][i] *= 0.
 
         # concatenate all the stuff
         embeddings: torch.Tensor = torch.cat(embeddings, dim=0)
         embeddings_cycle: torch.Tensor = torch.cat(embeddings_cycle, dim=0)
-        embedding_prediction: torch.Tensor = torch.cat(embedding_prediction, dim=0)
+        # embedding_prediction: torch.Tensor = torch.cat(embedding_prediction, dim=0)
 
-        embeddings: torch.Tensor = torch.cat((embeddings, embeddings_cycle, embedding_prediction),
+        # embeddings: torch.Tensor = torch.cat((embeddings, embeddings_cycle, embedding_prediction),
+        #                                      dim=0)
+        embeddings: torch.Tensor = torch.cat((embeddings, embeddings_cycle),
                                              dim=0)
 
-        prediction_embeddings = prediction_embeddings.unsqueeze(-2)
-        while embeddings.dim() < prediction_embeddings.dim():
-            embeddings = embeddings.unsqueeze(0)
-
-        logits = embeddings * prediction_embeddings
-        logits = torch.sum(logits, dim=-1)
+        logits = torch.matmul(prediction_embeddings, embeddings.transpose(0, 1))
 
         probabilities = self.softmax(logits)
 
@@ -319,11 +360,11 @@ class InputProcessor:
         data_array = self.arrays[type_idx]
 
         if key in idx:
-            infos[idx[key]].length += 1
+            infos[idx[key]].count += 1
             return
 
         idx[key] = len(infos)
-        infos.append(IdentifierInfo(len(infos), len(data_array), len(arr)))
+        infos.append(IdentifierInfo(len(infos), len(data_array), len(arr), key))
 
         self.arrays[type_idx] = np.concatenate((data_array, arr), axis=0)
 
@@ -390,8 +431,8 @@ class InputProcessor:
             type_mask.append(0)
             codes.append(c)
 
-        codes = np.array(codes, dtype=np.uint32)
-        type_mask = np.array(type_mask, dtype=np.uint32)
+        codes = np.array(codes, dtype=np.int32)
+        type_mask = np.array(type_mask, dtype=np.int32)
         codes = type_mask * TYPE_MASK_BASE + codes
 
         return EncodedFile(file.path, codes)
@@ -408,11 +449,19 @@ class InputProcessor:
 
 class BatchBuilder:
     def __init__(self, input_processor: InputProcessor):
-        self.input_processor = input_processor
+        self.infos = input_processor.infos
+        self.token_data_arrays = input_processor.arrays
+        self.freqs = [self.get_frequencies(info) for info in self.infos]
+
+    @staticmethod
+    def get_frequencies(info: List[IdentifierInfo]):
+        freqs = [(i.code, i.count) for i in info]
+        freqs.sort(reverse=True, key=lambda x: x[1])
+        return [f[0] for f in freqs]
 
     @staticmethod
     def get_batches(files: List[parser.load.EncodedFile],
-                    eof: int, batch_size=32, seq_len=32):
+                    eof: int, batch_size: int, seq_len: int):
         """
         Covert raw encoded files into training/validation batches
         """
@@ -430,7 +479,7 @@ class BatchBuilder:
         data = []
         last_clean = 0
 
-        eof = np.array([eof], dtype=np.uint32)
+        eof = np.array([eof], dtype=np.int32)
 
         for i, f in enumerate(files):
             if len(f.codes) == 0:
@@ -469,8 +518,8 @@ class BatchBuilder:
 
         idx = [batches * i for i in range(batch_size)]
         for i in range(batches):
-            x_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
-            y_batch = np.zeros((batch_size, seq_len), dtype=np.uint32)
+            x_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
+            y_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
             for j in range(batch_size):
                 n = idx[j] // batch_size
                 m = idx[j] % batch_size
@@ -489,15 +538,26 @@ class BatchBuilder:
         return x, y
 
     def create_token_array(self, token_type: int, length: int, tokens: list):
-        infos = self.input_processor.infos[token_type]
-        data_array = self.input_processor.arrays[token_type]
-        return np.zeros((len(tokens), length), dtype=np.uint8)
+        res = np.zeros((len(tokens), length), dtype=np.uint8)
 
-    def build_batch(self, x_source: np.ndarray, y_source: np.ndarray):
-        type_infos = self.input_processor.infos
+        if token_type == 0:
+            res[:, 0] = tokens
+            return res
 
+        token_type -= 1
+        infos = self.infos[token_type]
+        data_array = self.token_data_arrays[token_type]
+
+        for i, t in enumerate(tokens):
+            info = infos[t]
+            res[i, :info.length] = data_array[info.offset:info.offset + info.length]
+
+        return res
+
+    def _get_token_sets(self, x_source: np.ndarray, y_source: np.ndarray):
         batch_size, seq_len = x_source.shape
-        sets = [set() for _ in range(len(type_infos) + 1)]
+
+        sets: List[set] = [set() for _ in range(len(self.infos) + 1)]
 
         for b in range(batch_size):
             for s in range(seq_len):
@@ -509,20 +569,58 @@ class BatchBuilder:
                 c = y_source[b, s] % TYPE_MASK_BASE
                 sets[type_idx].add(c)
 
-        # TODO: add 128 most popular tokens
-        # replace 0 tokens (base tokens) with VOCAB_SIZE
-        # build token data arrays
-        # token data arrays can be of different sizes
-        return [len(s) for s in sets]
+        for i in range(1, len(self.infos) + 1):
+            sets[i] = sets[i].union(self.freqs[i - 1][:128])
+
+        return sets
+
+    def build_batch(self, x_source: np.ndarray, y_source: np.ndarray):
+        batch_size, seq_len = x_source.shape
+
+        lists = [list(s) for s in self._get_token_sets(x_source, y_source)]
+        lists[0] = [i for i in range(tokenizer.VOCAB_SIZE)]
+
+        dicts = [{c: i for i, c in enumerate(s)} for s in lists]
+
+        token_data = []
+        for i, length in enumerate(MAX_LENGTH):
+            token_data.append(self.create_token_array(i, length, lists[i]))
+
+        x = np.zeros_like(x_source, dtype=np.int32)
+        x_type = np.zeros_like(x_source, dtype=np.int8)
+        y = np.zeros_like(y_source, dtype=np.int32)
+        y_type = np.zeros_like(y_source, dtype=np.int8)
+        y_idx = np.zeros_like(y_source, dtype=np.int32)
+
+        offset = np.cumsum([0] + [len(s) for s in lists])
+
+        for b in range(batch_size):
+            for s in range(seq_len):
+                type_idx = x_source[b, s] // TYPE_MASK_BASE
+                c = x_source[b, s] % TYPE_MASK_BASE
+                x[b, s] = dicts[type_idx][c]
+                x_type[b, s] = type_idx
+
+                type_idx = y_source[b, s] // TYPE_MASK_BASE
+                c = y_source[b, s] % TYPE_MASK_BASE
+                y[b, s] = dicts[type_idx][c]
+                y_type[b, s] = type_idx
+                y_idx[b, s] = offset[type_idx] + dicts[type_idx][c]
+
+        return Batch(x, y, x_type, y_type, y_idx,
+                     token_data[0],
+                     token_data[1],
+                     token_data[2])
+
+        # return [len(s) for s in sets]
 
     def build_batches(self, x: List[np.ndarray], y: List[np.ndarray]):
         n_batches = len(x)
 
-        batches = []
+        batches: List[Batch] = []
         for b in range(n_batches):
             batches.append(self.build_batch(x[b], y[b]))
 
-        batches = np.array(batches)
         return batches
 
 
@@ -546,8 +644,10 @@ class Trainer:
                                    batch_size=batch_size,
                                    seq_len=seq_len)
 
-        self.batches = builder.build_batches(x, y)
         del files
+
+        self.batches = builder.build_batches(x, y)
+        del builder
 
         # Initial state
         self.hn = h0
@@ -559,39 +659,41 @@ class Trainer:
         self.optimizer = optimizer
         self.is_train = is_train
 
-    def run(self, i):
+    def run(self, batch_idx):
         # Get model output
-        batch = self.batches[i]
+        batch = self.batches[batch_idx]
         x = torch.tensor(batch.x, device=device, dtype=torch.int64)
-        y = torch.tensor(batch.y, device=device, dtype=torch.int64)
-        type_mask = torch.tensor(batch.type_mask, device=device, dtype=torch.int64)
+        x_type = torch.tensor(batch.x_type, device=device, dtype=torch.int64)
+        if self.is_train:
+            y = torch.tensor(batch.y, device=device, dtype=torch.int64)
+            y_type = torch.tensor(batch.y_type, device=device, dtype=torch.int64)
+        else:
+            y = None
+            y_type = None
+        y_idx = torch.tensor(batch.y_idx, device=device, dtype=torch.int64)
+        tokens = torch.tensor(batch.tokens, device=device, dtype=torch.int64)
         ids = torch.tensor(batch.ids, device=device, dtype=torch.int64)
         nums = torch.tensor(batch.nums, device=device, dtype=torch.int64)
-        tokens = torch.tensor(batch.tokens, device=device, dtype=torch.int64)
 
-        if self.is_train:
-            model_y = y
-        else:
-            model_y = None
-
-        out: ModelOutput = self.model(x, type_mask,
-                                      ids, nums, tokens,
-                                      self.hn, self.cn,
-                                      model_y)
+        out: ModelOutput = self.model(x, y,
+                                      x_type, y_type,
+                                      tokens, ids, nums,
+                                      self.hn, self.cn)
 
         # Flatten outputs
         logits = out.logits
         logits = logits.view(-1, logits.shape[-1])
-        yi = y.view(-1)
+        y_idx = y_idx.view(-1)
 
         # Calculate loss
-        loss = self.loss_func(logits, yi)
+        loss = self.loss_func(logits, y_idx)
         total_loss = loss
         enc_dec_losses = []
 
         for lf, logits, actual in zip(self.encoder_decoder_loss_funcs,
                                       out.decoded_input_logits,
-                                      [ids, nums, tokens]):
+                                      [tokens, ids, nums]):
+            logits = logits.contiguous()
             logits = logits.view(-1, logits.shape[-1])
             yi = actual.view(-1)
             enc_dec_losses.append(lf(logits, yi))
@@ -621,6 +723,8 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
     with logger.section("Loading data"):
         # Load all python files
         files = parser.load.load_files()
+
+    # files = files[:100]
 
     # Transform files
     processor = InputProcessor()
@@ -738,7 +842,7 @@ def run_epoch(epoch, model,
 
 def main():
     batch_size = 32
-    seq_len = 32
+    seq_len = 64
 
     with logger.section("Create model"):
         # Create model
@@ -794,9 +898,12 @@ def main():
     # Start training scratch (step '0')
     EXPERIMENT.start_train(True)
 
-    # Setup logger indicators
-    logger.add_indicator("train_loss", queue_limit=500, is_histogram=True)
-    logger.add_indicator("valid_loss", queue_limit=500, is_histogram=True)
+    # Setup logger
+    for t in ['train', 'valid']:
+        logger.add_indicator(f"{t}_loss", queue_limit=500, is_histogram=True)
+        logger.add_indicator(f"{t}_loss_main", queue_limit=500, is_histogram=True)
+        for i in range(3):
+            logger.add_indicator(f"{t}_loss_enc_dec_{i}", queue_limit=500, is_histogram=True)
 
     for epoch in range(100):
         if not run_epoch(epoch, model,
