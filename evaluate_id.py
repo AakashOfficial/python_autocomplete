@@ -29,7 +29,7 @@ logger = EXPERIMENT.logger
 device = torch.device("cuda:1")
 
 # Beam search
-BEAM_SIZE = 1024
+BEAM_SIZE = 100024
 
 
 class Suggestions(NamedTuple):
@@ -217,14 +217,19 @@ class Predictor:
         return prediction.detach().cpu().numpy(), decoded_prediction
 
     def get_string(self, code, prev_code, decoded_prediction):
-        is_keyword = False
+        prev_special = False
+        code_special = False
 
         if prev_code < tokenizer.VOCAB_SIZE:
-            if tokenizer.decode_code(prev_code).type == tokenizer.TokenType.keyword:
-                is_keyword = True
+            if tokenizer.DESERIALIZE[prev_code].type == tokenizer.TokenType.keyword:
+                prev_special = True
+        else:
+            prev_special = True
         if code < tokenizer.VOCAB_SIZE:
-            if tokenizer.decode_code(code).type == tokenizer.TokenType.keyword:
-                is_keyword = True
+            if tokenizer.DESERIALIZE[code].type == tokenizer.TokenType.keyword:
+                code_special = True
+        else:
+            code_special = True
 
         res = None
         if code < tokenizer.VOCAB_SIZE:
@@ -258,7 +263,7 @@ class Predictor:
 
         assert res is not None
 
-        if is_keyword:
+        if prev_special and code_special:
             return ' ' + res
         else:
             return res
@@ -563,9 +568,9 @@ def main():
     # s = predictor.get_suggestion()
 
     # Evaluate all the files in validation set
-    for file in train_files[1:]:
+    for file in valid_files[0:]:
         logger.log(str(file.path), color=colors.BrightColor.orange)
-        evaluator = Evaluator(model, file, sample=train_files[0],
+        evaluator = Evaluator(model, file, sample=valid_files[0],
                               skip_spaces=True)
         keys_saved = evaluator.eval()
 

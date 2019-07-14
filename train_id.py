@@ -943,7 +943,7 @@ def main():
     EXPERIMENT.add_models({'base': model})
 
     # Start training scratch
-    EXPERIMENT.start_train(False)
+    EXPERIMENT.start_train(True)
 
     # Setup logger
     for t in ['train', 'valid']:
