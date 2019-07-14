@@ -152,6 +152,7 @@ class LstmDecoder(torch.nn.Module):
 
         decoded = []
         decoded_logits = []
+        # TODO: Use actual sequence for training
         for i in range(self.length):
             out, (h0, c0) = self.lstm(x, (h0, c0))
             logits: torch.Tensor = self.output_fc(out)
@@ -734,7 +735,7 @@ class Trainer:
             logits = logits.view(-1, logits.shape[-1])
             yi = actual.view(-1)
             enc_dec_losses.append(lf(logits, yi))
-            total_loss = total_loss + enc_dec_losses[-1]
+            total_loss = total_loss + enc_dec_losses[-1] * 5.
 
         # Store the states
         self.hn = out.hn.detach()
@@ -761,7 +762,7 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
         # Load all python files
         files = parser.load.load_files()
 
-    # files = files[:100]
+    files = files[:100]
 
     # Transform files
     processor = InputProcessor()
@@ -879,6 +880,7 @@ def run_epoch(epoch, model,
 
 
 def create_model():
+    encoding_size = 256
     id_vocab = tokenizer.get_vocab_size(tokenizer.TokenType.name)
     num_vocab = tokenizer.get_vocab_size(tokenizer.TokenType.number)
 
@@ -886,23 +888,23 @@ def create_model():
                               vocab_embedding_size=256,
                               lstm_size=256,
                               lstm_layers=3,
-                              encoding_size=1024)
+                              encoding_size=encoding_size)
     encoder_nums = LstmEncoder(vocab_size=num_vocab + 1,
                                vocab_embedding_size=256,
                                lstm_size=256,
                                lstm_layers=3,
-                               encoding_size=1024)
-    token_embeddings = torch.nn.Embedding(tokenizer.VOCAB_SIZE, 1024)
+                               encoding_size=encoding_size)
+    token_embeddings = torch.nn.Embedding(tokenizer.VOCAB_SIZE, encoding_size)
     encoder_tokens = EmbeddingsEncoder(embedding=token_embeddings)
 
     decoder_ids = LstmDecoder(vocab_size=id_vocab + 1,
                               lstm_size=256,
                               lstm_layers=3,
-                              encoding_size=1024)
+                              encoding_size=encoding_size)
     decoder_nums = LstmDecoder(vocab_size=num_vocab + 1,
                                lstm_size=256,
                                lstm_layers=3,
-                               encoding_size=1024)
+                               encoding_size=encoding_size)
     decoder_tokens = EmbeddingsDecoder(embedding=token_embeddings)
 
     model = Model(encoder_ids=encoder_ids,
@@ -911,7 +913,7 @@ def create_model():
                   decoder_ids=decoder_ids,
                   decoder_nums=decoder_nums,
                   decoder_tokens=decoder_tokens,
-                  encoding_size=1024,
+                  encoding_size=encoding_size,
                   lstm_size=1024,
                   lstm_layers=3)
 
