@@ -190,7 +190,14 @@ def _decode_code(code: int) -> ParsedToken:
             return ParsedToken(p.token_type, code - p.offset)
 
 
+def decode_code(code: int) -> ParsedToken:
+    for p in _PARSERS:
+        if code < p.offset + len(p):
+            return ParsedToken(p.token_type, code - p.offset)
+
+
 def _token_to_string(token: ParsedToken, prev: Optional[ParsedToken]):
+    # TODO fix keyword_1 and keyword_2
     is_spaced = False
     if prev is not None:
         if prev.type == TokenType.keyword:

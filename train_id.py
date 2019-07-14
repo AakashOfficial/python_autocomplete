@@ -36,10 +36,10 @@ TYPE_MASK_BASE = 1 << 20
 
 class Batch(NamedTuple):
     x: np.ndarray
-    y: np.ndarray
+    y: Optional[np.ndarray]
     x_type: np.ndarray
-    y_type: np.ndarray
-    y_idx: np.ndarray
+    y_type: Optional[np.ndarray]
+    y_idx: Optional[np.ndarray]
     tokens: np.ndarray
     ids: np.ndarray
     nums: np.ndarray
@@ -368,13 +368,13 @@ class InputProcessor:
 
         self.arrays[type_idx] = np.concatenate((data_array, arr), axis=0)
 
-    def gather_file(self, file: parser.load.EncodedFile):
+    def gather(self, input_codes: np.ndarray):
         types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
         offsets: List[int] = [tokenizer.get_vocab_offset(t) for t in types]
         strings: List[Optional[str]] = [None for _ in types]
         arrays: List[List[int]] = [[] for _ in types]
 
-        for c in file.codes:
+        for c in input_codes:
             t = tokenizer.DESERIALIZE[c]
             for type_idx, token_type in enumerate(types):
                 if t.type != token_type:
@@ -392,20 +392,25 @@ class InputProcessor:
                     else:
                         strings[type_idx] += ch
 
+        for type_idx, _ in enumerate(types):
+            if strings[type_idx] is not None:
+                self.add_to(type_idx, strings[type_idx],
+                            np.array(arrays[type_idx], dtype=np.uint8))
+
     def gather_files(self, files: List[parser.load.EncodedFile]):
         with logger.section("Counting", total_steps=len(files)):
             for i, f in enumerate(files):
-                self.gather_file(f)
+                self.gather(f.codes)
                 logger.progress(i + 1)
 
-    def transform_file(self, file: EncodedFile):
+    def transform(self, input_codes: np.ndarray):
         types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
         strings: List[Optional[str]] = [None for _ in types]
 
         type_mask = []
         codes = []
 
-        for c in file.codes:
+        for c in input_codes:
             t = tokenizer.DESERIALIZE[c]
             skip = False
             for type_idx, token_type in enumerate(types):
@@ -431,17 +436,24 @@ class InputProcessor:
             type_mask.append(0)
             codes.append(c)
 
+        for type_idx, token_type in enumerate(types):
+            if strings[type_idx] is not None:
+                type_mask.append(type_idx + 1)
+                idx = self.dictionaries[type_idx][strings[type_idx]]
+                codes.append(self.infos[type_idx][idx].code)
+                strings[type_idx] = None
+
         codes = np.array(codes, dtype=np.int32)
         type_mask = np.array(type_mask, dtype=np.int32)
         codes = type_mask * TYPE_MASK_BASE + codes
 
-        return EncodedFile(file.path, codes)
+        return codes
 
     def transform_files(self, files: List[parser.load.EncodedFile]) -> List[EncodedFile]:
         transformed = []
         with logger.section("Transforming", total_steps=len(files)):
             for i, f in enumerate(files):
-                transformed.append(self.transform_file(f))
+                transformed.append(EncodedFile(f.path, self.transform(f.codes)))
                 logger.progress(i + 1)
 
         return transformed
@@ -555,18 +567,18 @@ class BatchBuilder:
         return res
 
     def _get_token_sets(self, x_source: np.ndarray, y_source: np.ndarray):
-        batch_size, seq_len = x_source.shape
+        seq_len, batch_size = x_source.shape
 
         sets: List[set] = [set() for _ in range(len(self.infos) + 1)]
 
-        for b in range(batch_size):
-            for s in range(seq_len):
-                type_idx = x_source[b, s] // TYPE_MASK_BASE
-                c = x_source[b, s] % TYPE_MASK_BASE
+        for s in range(seq_len):
+            for b in range(batch_size):
+                type_idx = x_source[s, b] // TYPE_MASK_BASE
+                c = x_source[s, b] % TYPE_MASK_BASE
                 sets[type_idx].add(c)
 
-                type_idx = y_source[b, s] // TYPE_MASK_BASE
-                c = y_source[b, s] % TYPE_MASK_BASE
+                type_idx = y_source[s, b] // TYPE_MASK_BASE
+                c = y_source[s, b] % TYPE_MASK_BASE
                 sets[type_idx].add(c)
 
         for i in range(1, len(self.infos) + 1):
@@ -575,7 +587,7 @@ class BatchBuilder:
         return sets
 
     def build_batch(self, x_source: np.ndarray, y_source: np.ndarray):
-        batch_size, seq_len = x_source.shape
+        seq_len, batch_size = x_source.shape
 
         lists = [list(s) for s in self._get_token_sets(x_source, y_source)]
         lists[0] = [i for i in range(tokenizer.VOCAB_SIZE)]
@@ -594,18 +606,18 @@ class BatchBuilder:
 
         offset = np.cumsum([0] + [len(s) for s in lists])
 
-        for b in range(batch_size):
-            for s in range(seq_len):
-                type_idx = x_source[b, s] // TYPE_MASK_BASE
-                c = x_source[b, s] % TYPE_MASK_BASE
-                x[b, s] = dicts[type_idx][c]
-                x_type[b, s] = type_idx
+        for s in range(seq_len):
+            for b in range(batch_size):
+                type_idx = x_source[s, b] // TYPE_MASK_BASE
+                c = x_source[s, b] % TYPE_MASK_BASE
+                x[s, b] = dicts[type_idx][c]
+                x_type[s, b] = type_idx
 
-                type_idx = y_source[b, s] // TYPE_MASK_BASE
-                c = y_source[b, s] % TYPE_MASK_BASE
-                y[b, s] = dicts[type_idx][c]
-                y_type[b, s] = type_idx
-                y_idx[b, s] = offset[type_idx] + dicts[type_idx][c]
+                type_idx = y_source[s, b] // TYPE_MASK_BASE
+                c = y_source[s, b] % TYPE_MASK_BASE
+                y[s, b] = dicts[type_idx][c]
+                y_type[s, b] = type_idx
+                y_idx[s, b] = offset[type_idx] + dicts[type_idx][c]
 
         return Batch(x, y, x_type, y_type, y_idx,
                      token_data[0],
@@ -697,6 +709,8 @@ class Trainer:
             logits = logits.view(-1, logits.shape[-1])
             yi = actual.view(-1)
             enc_dec_losses.append(lf(logits, yi))
+            # TODO total_loss = total_loss +
+            # So that loss and total loss aren't equal
             total_loss += enc_dec_losses[-1]
 
         # Store the states
@@ -724,7 +738,7 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
         # Load all python files
         files = parser.load.load_files()
 
-    # files = files[:100]
+    files = files[:100]
 
     # Transform files
     processor = InputProcessor()
@@ -830,6 +844,7 @@ def run_epoch(epoch, model,
                     logger.new_line()
 
         except KeyboardInterrupt:
+            # TODO Progress save doesn't work
             logger.save_progress()
             logger.save_checkpoint()
             logger.new_line()
@@ -840,49 +855,56 @@ def run_epoch(epoch, model,
     return True
 
 
+def create_model():
+    id_vocab = tokenizer.get_vocab_size(tokenizer.TokenType.name)
+    num_vocab = tokenizer.get_vocab_size(tokenizer.TokenType.number)
+
+    encoder_ids = LstmEncoder(vocab_size=id_vocab + 1,
+                              vocab_embedding_size=256,
+                              lstm_size=256,
+                              lstm_layers=3,
+                              encoding_size=1024)
+    encoder_nums = LstmEncoder(vocab_size=num_vocab + 1,
+                               vocab_embedding_size=256,
+                               lstm_size=256,
+                               lstm_layers=3,
+                               encoding_size=1024)
+    token_embeddings = torch.nn.Embedding(tokenizer.VOCAB_SIZE, 1024)
+    encoder_tokens = EmbeddingsEncoder(embedding=token_embeddings)
+
+    decoder_ids = LstmDecoder(vocab_size=id_vocab + 1,
+                              lstm_size=256,
+                              lstm_layers=3,
+                              encoding_size=1024)
+    decoder_nums = LstmDecoder(vocab_size=num_vocab + 1,
+                               lstm_size=256,
+                               lstm_layers=3,
+                               encoding_size=1024)
+    decoder_tokens = EmbeddingsDecoder(embedding=token_embeddings)
+
+    model = Model(encoder_ids=encoder_ids,
+                  encoder_nums=encoder_nums,
+                  encoder_tokens=encoder_tokens,
+                  decoder_ids=decoder_ids,
+                  decoder_nums=decoder_nums,
+                  decoder_tokens=decoder_tokens,
+                  encoding_size=1024,
+                  lstm_size=1024,
+                  lstm_layers=3)
+
+    # Move model to `device`
+    model.to(device)
+
+    return model
+
+
 def main():
     batch_size = 32
     seq_len = 64
 
     with logger.section("Create model"):
         # Create model
-        id_vocab = tokenizer.get_vocab_size(tokenizer.TokenType.name)
-        num_vocab = tokenizer.get_vocab_size(tokenizer.TokenType.number)
-        encoder_ids = LstmEncoder(vocab_size=id_vocab + 1,
-                                  vocab_embedding_size=256,
-                                  lstm_size=256,
-                                  lstm_layers=3,
-                                  encoding_size=1024)
-        encoder_nums = LstmEncoder(vocab_size=num_vocab + 1,
-                                   vocab_embedding_size=256,
-                                   lstm_size=256,
-                                   lstm_layers=3,
-                                   encoding_size=1024)
-        token_embeddings = torch.nn.Embedding(tokenizer.VOCAB_SIZE, 1024)
-        encoder_tokens = EmbeddingsEncoder(embedding=token_embeddings)
-
-        decoder_ids = LstmDecoder(vocab_size=id_vocab + 1,
-                                  lstm_size=256,
-                                  lstm_layers=3,
-                                  encoding_size=1024)
-        decoder_nums = LstmDecoder(vocab_size=num_vocab + 1,
-                                   lstm_size=256,
-                                   lstm_layers=3,
-                                   encoding_size=1024)
-        decoder_tokens = EmbeddingsDecoder(embedding=token_embeddings)
-
-        model = Model(encoder_ids=encoder_ids,
-                      encoder_nums=encoder_nums,
-                      encoder_tokens=encoder_tokens,
-                      decoder_ids=decoder_ids,
-                      decoder_nums=decoder_nums,
-                      decoder_tokens=decoder_tokens,
-                      encoding_size=1024,
-                      lstm_size=1024,
-                      lstm_layers=3)
-
-        # Move model to `device`
-        model.to(device)
+        model = create_model()
 
         # Create loss function and optimizer
         loss_func = torch.nn.CrossEntropyLoss()
@@ -895,8 +917,8 @@ def main():
     # Specify the model in [lab](https://github.com/vpj/lab) for saving and loading
     EXPERIMENT.add_models({'base': model})
 
-    # Start training scratch (step '0')
-    EXPERIMENT.start_train(True)
+    # Start training scratch
+    EXPERIMENT.start_train(False)
 
     # Setup logger
     for t in ['train', 'valid']:
