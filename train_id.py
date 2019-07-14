@@ -2,7 +2,7 @@
 This is still work in progress
 
 TODO: This code is hacked together to try things fast.
-TODO: Needs refactoring and cleaning up.
+TODO: Needs a complete rewrite from tokenizer level
 """
 
 import math
@@ -47,6 +47,7 @@ class Batch(NamedTuple):
 
 class ModelOutput(NamedTuple):
     decoded_input_logits: torch.Tensor
+    decoded_predictions: Optional[torch.Tensor]
     probabilities: torch.Tensor
     logits: torch.Tensor
     hn: torch.Tensor
@@ -238,6 +239,7 @@ class Model(torch.nn.Module):
                                   num_layers=lstm_layers)
         self.output_fc = torch.nn.Linear(lstm_size, encoding_size)
         self.softmax = torch.nn.Softmax(dim=-1)
+        self.is_evaluate = False
 
     @staticmethod
     def apply_transform(funcs, values, n_outputs=1):
@@ -303,44 +305,63 @@ class Model(torch.nn.Module):
 
         # Reversed inputs
         decoded_inputs, decoded_input_logits = self.apply_transform(decoders, embeddings, 2)
+        for i, di in enumerate(decoded_inputs):
+            di = di.argmax(dim=-1).detach()
+            if len(di.shape) == 1:
+                di = di.reshape(-1, 1)
+            decoded_inputs[i] = di
+
         embeddings_cycle: List[torch.Tensor] = self.apply_transform(encoders, decoded_inputs)
 
-        # softmax_masks = [(decoded_inputs[i] != inputs[i]).max(dim=1, keepdim=True) for i in
-        #                  range(n_inputs)]
-        # embeddings_cycle = [embeddings_cycle[i] * softmax_masks[i] for i in range(n_inputs)]
-
-        # Reversed prediction
-        # decoded_prediction, _ = self.apply_transform(decoders, prediction_embeddings, 2)
-        # embedding_prediction: List[torch.Tensor] = self.apply_transform(encoders,
-        #                                                                 decoded_prediction)
-        # if y is not None:
-        #     for i in range(n_inputs):
-        #         embedding_prediction[j] *= (y_type == i)
-        #     # TODO zero out if decoded_prediction is same as inputs[y]
-        #     for i in range(batch_size):
-        #         t: int = y_type[i]
-        #         n: int = y[i]
-        #         for j in range(n_inputs):
-        #             if j != t:
-        #                 embedding_prediction[j][i] *= 0.
-        #         if inputs[t][n] == decoded_prediction[t][i]:
-        #             embedding_prediction[t][i] *= 0.
+        softmax_masks = [(decoded_inputs[i] != inputs[i]).max(dim=1, keepdim=True)[0] for i in
+                         range(n_inputs)]
+        softmax_masks = [m.to(torch.float32) for m in softmax_masks]
+        embeddings_cycle = [embeddings_cycle[i] * softmax_masks[i] for i in range(n_inputs)]
 
         # concatenate all the stuff
         embeddings: torch.Tensor = torch.cat(embeddings, dim=0)
         embeddings_cycle: torch.Tensor = torch.cat(embeddings_cycle, dim=0)
-        # embedding_prediction: torch.Tensor = torch.cat(embedding_prediction, dim=0)
 
-        # embeddings: torch.Tensor = torch.cat((embeddings, embeddings_cycle, embedding_prediction),
-        #                                      dim=0)
-        embeddings: torch.Tensor = torch.cat((embeddings, embeddings_cycle),
-                                             dim=0)
+        if self.is_evaluate:
+            # Reversed prediction
+            pe = prediction_embeddings.view(-1, embedding_size)
+            decoded_prediction, _ = self.apply_transform(decoders,
+                                                         [pe] * len(decoders),
+                                                         2)
+            for i, di in enumerate(decoded_prediction):
+                di = di.argmax(dim=-1).detach()
+                if len(di.shape) == 1:
+                    di = di.unsqueeze(-1)
+                decoded_prediction[i] = di
+            embedding_prediction: List[torch.Tensor] = self.apply_transform(encoders,
+                                                                            decoded_prediction)
+            # if y is not None:
+            #     for i in range(n_inputs):
+            #         embedding_prediction[j] *= (y_type == i)
+            #     # TODO zero out if decoded_prediction is same as inputs[y]
+            #     for i in range(batch_size):
+            #         t: int = y_type[i]
+            #         n: int = y[i]
+            #         for j in range(n_inputs):
+            #             if j != t:
+            #                 embedding_prediction[j][i] *= 0.
+            #         if inputs[t][n] == decoded_prediction[t][i]:
+            #             embedding_prediction[t][i] *= 0.
+
+            embedding_prediction: torch.Tensor = torch.cat(embedding_prediction, dim=0)
+            embeddings: torch.Tensor = torch.cat((embeddings, embedding_prediction),
+                                                 dim=0)
+        else:
+            embeddings: torch.Tensor = torch.cat((embeddings, embeddings_cycle),
+                                                 dim=0)
+            decoded_prediction = None
 
         logits = torch.matmul(prediction_embeddings, embeddings.transpose(0, 1))
 
         probabilities = self.softmax(logits)
 
-        return ModelOutput(decoded_input_logits, probabilities, logits, hn, cn)
+        return ModelOutput(decoded_input_logits, decoded_prediction,
+                           probabilities, logits, hn, cn)
 
 
 class InputProcessor:
@@ -353,6 +374,10 @@ class InputProcessor:
         self.dictionaries: List[Dict[str, int]] = [{} for _ in self.infos]
         self.arrays: List[np.ndarray] = [np.array([], dtype=np.uint8) for _ in self.infos]
         self.counts: List[int] = [0 for _ in self.infos]
+        types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
+        # -1 because this is used right now for decoding,
+        # and we've added 1 since 0 is used for padding
+        self.offsets: List[int] = [0] + [tokenizer.get_vocab_offset(t) - 1 for t in types]
 
     def add_to(self, type_idx: int, key: str, arr: np.ndarray):
         idx = self.dictionaries[type_idx]
@@ -738,7 +763,7 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
         # Load all python files
         files = parser.load.load_files()
 
-    files = files[:100]
+    # files = files[:100]
 
     # Transform files
     processor = InputProcessor()

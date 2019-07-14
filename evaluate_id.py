@@ -29,7 +29,7 @@ logger = EXPERIMENT.logger
 device = torch.device("cuda:1")
 
 # Beam search
-BEAM_SIZE = 8
+BEAM_SIZE = 1024
 
 
 class Suggestions(NamedTuple):
@@ -212,10 +212,11 @@ class Predictor:
 
         # Final prediction
         prediction = out.probabilities[-1, :, :]
+        decoded_prediction = [d.detach().cpu().numpy() for d in out.decoded_predictions]
 
-        return prediction.detach().cpu().numpy()
+        return prediction.detach().cpu().numpy(), decoded_prediction
 
-    def get_string(self, code, prev_code):
+    def get_string(self, code, prev_code, decoded_prediction):
         is_keyword = False
 
         if prev_code < tokenizer.VOCAB_SIZE:
@@ -229,7 +230,7 @@ class Predictor:
         if code < tokenizer.VOCAB_SIZE:
             token = tokenizer.DESERIALIZE[code]
             if token.type in tokenizer.LINE_BREAK:
-                return None
+                return '[NL]'
             res = tokenizer.DECODE[code][0]
         else:
             code -= tokenizer.VOCAB_SIZE
@@ -242,7 +243,20 @@ class Predictor:
                     code -= len(self.processor.infos[i])
 
         if res is None:
-            return None
+            for idx, dp in enumerate(decoded_prediction):
+                if code < len(dp):
+                    coding = dp[code]
+                    res = ''
+                    for c in coding:
+                        if c == 0:
+                            break
+                        c += self.processor.offsets[idx]
+                        res += tokenizer.DECODE[c][0]
+                    break
+                else:
+                    code -= len(dp)
+
+        assert res is not None
 
         if is_keyword:
             return ' ' + res
@@ -266,7 +280,7 @@ class Predictor:
 
             # Get predictions
             start_time = time.time()
-            predictions = self.get_predictions(sugg.codes)
+            predictions, decoded_prediction = self.get_predictions(sugg.codes)
             self.time_predict += time.time() - start_time
 
             start_time = time.time()
@@ -274,7 +288,7 @@ class Predictor:
             choices = []
             for idx in range(batch_size):
                 for code in range(predictions.shape[1]):
-                    string = self.get_string(code, sugg.codes[idx][-1])
+                    string = self.get_string(code, sugg.codes[idx][-1], decoded_prediction)
                     if string is None:
                         continue
                     score = sugg.scores[idx] * predictions[idx, code]
@@ -294,7 +308,7 @@ class Predictor:
                 prev_idx = choice.idx[0]
                 code = choice.idx[1]
 
-                string = self.get_string(code, sugg.codes[prev_idx][-1])
+                string = self.get_string(code, sugg.codes[prev_idx][-1], decoded_prediction)
                 if string is None:
                     continue
 
@@ -340,9 +354,9 @@ class Predictor:
             batch_size = len(sugg.codes)
             for idx in range(batch_size):
                 length = sugg.matched[idx] - len(self._untokenized)
-                if length <= 2:
+                if length <= 0:
                     continue
-                choice = sugg.scores[idx] * math.sqrt(length - 1)
+                choice = sugg.scores[idx] * math.sqrt(length)
                 choices.append(ScoredItem(choice, (s_idx, idx)))
         choices.sort(key=lambda x: x.score, reverse=True)
 
@@ -352,7 +366,7 @@ class Predictor:
             res = ""
             prev = self._last_token
             for code in codes[1:]:
-                res += self.get_string(code, prev)
+                res += self.get_string(code, prev, decoded_prediction)
                 prev = code
 
             res = res[len(self._untokenized):]
@@ -532,10 +546,11 @@ class Evaluator:
 def main():
     with logger.section("Loading data"):
         files = parser.load.load_files()
-        _, valid_files = parser.load.split_train_valid(files, is_shuffle=False)
+        train_files, valid_files = parser.load.split_train_valid(files, is_shuffle=False)
 
     with logger.section("Create model"):
         model = train_id.create_model()
+        model.is_evaluate = True
 
     EXPERIMENT.add_models({'base': model})
 
@@ -548,9 +563,9 @@ def main():
     # s = predictor.get_suggestion()
 
     # Evaluate all the files in validation set
-    for file in valid_files[1:]:
+    for file in train_files[1:]:
         logger.log(str(file.path), color=colors.BrightColor.orange)
-        evaluator = Evaluator(model, file, sample=valid_files[0],
+        evaluator = Evaluator(model, file, sample=train_files[0],
                               skip_spaces=True)
         keys_saved = evaluator.eval()
 
