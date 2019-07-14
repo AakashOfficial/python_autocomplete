@@ -734,9 +734,7 @@ class Trainer:
             logits = logits.view(-1, logits.shape[-1])
             yi = actual.view(-1)
             enc_dec_losses.append(lf(logits, yi))
-            # TODO total_loss = total_loss +
-            # So that loss and total loss aren't equal
-            total_loss += enc_dec_losses[-1]
+            total_loss = total_loss + enc_dec_losses[-1]
 
         # Store the states
         self.hn = out.hn.detach()

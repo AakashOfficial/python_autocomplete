@@ -1,10 +1,9 @@
-import math
 import time
 import tokenize
 from io import BytesIO
-from typing import NamedTuple, List, Tuple
-import numpy as np
+from typing import NamedTuple, List, Tuple, Optional
 
+import numpy as np
 import torch
 import torch.nn
 
@@ -13,7 +12,6 @@ import parser.tokenizer
 import train_id
 from lab import colors
 from lab.experiment.pytorch import Experiment
-from model import SimpleLstmModel
 from parser import tokenizer
 
 # Experiment configuration to load checkpoints
@@ -188,7 +186,7 @@ class Predictor:
 
         # Input to the model
         x = np.array(codes_batch, dtype=np.int32)
-        x = np.transpose(x, (0, 1))
+        x = np.transpose(x, (1, 0))
 
         batch = self.create_batch(x)
 
@@ -216,7 +214,8 @@ class Predictor:
 
         return prediction.detach().cpu().numpy(), decoded_prediction
 
-    def get_string(self, code, prev_code, decoded_prediction):
+    def get_string(self, code, prev_code,
+                   decoded_prediction) -> Tuple[Optional[str], Optional[int]]:
         prev_special = False
         code_special = False
 
@@ -232,36 +231,71 @@ class Predictor:
             code_special = True
 
         res = None
+        new_code = None
         if code < tokenizer.VOCAB_SIZE:
             token = tokenizer.DESERIALIZE[code]
             if token.type in tokenizer.LINE_BREAK:
-                return '[NL]'
+                return None, None
             res = tokenizer.DECODE[code][0]
+            new_code = code
         else:
             code -= tokenizer.VOCAB_SIZE
 
             for i in range(len(self.processor.infos)):
                 if code < len(self.processor.infos[i]):
                     res = self.processor.infos[i][code].string
+                    new_code = (i + 1) * train_id.TYPE_MASK_BASE + code
                     break
                 else:
                     code -= len(self.processor.infos[i])
 
         if res is None:
-            for idx, dp in enumerate(decoded_prediction):
-                if code < len(dp):
-                    coding = dp[code]
-                    res = ''
-                    for c in coding:
-                        if c == 0:
-                            break
-                        c += self.processor.offsets[idx]
-                        res += tokenizer.DECODE[c][0]
-                    break
-                else:
-                    code -= len(dp)
+            return None, None
+            # TODO: generate unknown ids
+            # Need to add these back to input_processor for the beam search
+            # for idx, dp in enumerate(decoded_prediction):
+            #     if code < len(dp):
+            #         coding = dp[code]
+            #         res = ''
+            #         for c in coding:
+            #             if c == 0:
+            #                 break
+            #             c += self.processor.offsets[idx]
+            #             res += tokenizer.DECODE[c][0]
+            #         break
+            #     else:
+            #         code -= len(dp)
 
         assert res is not None
+
+        if prev_special and code_special:
+            return ' ' + res, new_code
+        else:
+            return res, new_code
+
+    def get_string_masked(self, code, prev_code) -> str:
+        prev_special = False
+        code_special = False
+        prev_type_idx = prev_code // train_id.TYPE_MASK_BASE
+        prev_code = prev_code % train_id.TYPE_MASK_BASE
+        type_idx = code // train_id.TYPE_MASK_BASE
+        code = code % train_id.TYPE_MASK_BASE
+
+        if prev_type_idx == 0:
+            if tokenizer.DESERIALIZE[prev_code].type == tokenizer.TokenType.keyword:
+                prev_special = True
+        else:
+            prev_special = True
+        if type_idx == 0:
+            if tokenizer.DESERIALIZE[code].type == tokenizer.TokenType.keyword:
+                code_special = True
+        else:
+            code_special = True
+
+        if type_idx == 0:
+            res = tokenizer.DECODE[code][0]
+        else:
+            res = self.processor.infos[type_idx - 1][code].string
 
         if prev_special and code_special:
             return ' ' + res
@@ -275,7 +309,7 @@ class Predictor:
                                    [1.])]
 
         # Do a beam search, up to the untokenized string length and 10 more
-        for step in range(1):
+        for step in range(2):
             sugg = suggestions[step]
             batch_size = len(sugg.codes)
 
@@ -293,12 +327,12 @@ class Predictor:
             choices = []
             for idx in range(batch_size):
                 for code in range(predictions.shape[1]):
-                    string = self.get_string(code, sugg.codes[idx][-1], decoded_prediction)
+                    string, _ = self.get_string(code, sugg.codes[idx][-1], decoded_prediction)
                     if string is None:
                         continue
                     score = sugg.scores[idx] * predictions[idx, code]
                     choices.append(ScoredItem(
-                        score * math.sqrt(sugg.matched[idx] + len(string)),
+                        score,  # * math.sqrt(sugg.matched[idx] + len(string)),
                         (idx, code)))
             # Sort them
             choices.sort(key=lambda x: x.score, reverse=True)
@@ -313,7 +347,7 @@ class Predictor:
                 prev_idx = choice.idx[0]
                 code = choice.idx[1]
 
-                string = self.get_string(code, sugg.codes[prev_idx][-1], decoded_prediction)
+                string, new_code = self.get_string(code, sugg.codes[prev_idx][-1], decoded_prediction)
                 if string is None:
                     continue
 
@@ -340,7 +374,7 @@ class Predictor:
                             matched += len(unmatched)
 
                 # Collect new item
-                codes.append(sugg.codes[prev_idx] + [code])
+                codes.append(sugg.codes[prev_idx] + [new_code])
                 matches.append(matched)
                 score = sugg.scores[prev_idx] * predictions[prev_idx, code]
                 scores.append(score)
@@ -359,9 +393,9 @@ class Predictor:
             batch_size = len(sugg.codes)
             for idx in range(batch_size):
                 length = sugg.matched[idx] - len(self._untokenized)
-                if length <= 0:
+                if length <= 1:
                     continue
-                choice = sugg.scores[idx] * math.sqrt(length)
+                choice = sugg.scores[idx]  # * math.sqrt(length)
                 choices.append(ScoredItem(choice, (s_idx, idx)))
         choices.sort(key=lambda x: x.score, reverse=True)
 
@@ -371,7 +405,8 @@ class Predictor:
             res = ""
             prev = self._last_token
             for code in codes[1:]:
-                res += self.get_string(code, prev, decoded_prediction)
+                string = self.get_string_masked(code, prev)
+                res += string
                 prev = code
 
             res = res[len(self._untokenized):]
@@ -562,10 +597,12 @@ def main():
     EXPERIMENT.start_replay()
 
     # For debugging with a specific piece of source code
-    # predictor = Predictor(model, lstm_layers, lstm_size)
-    # for s in ['""" """\n', "from __future__"]:
-    #     predictor.add(s)
-    # s = predictor.get_suggestion()
+    predictor = Predictor(model)
+    predictor.processor.gather(train_files[0].codes)
+
+    for s in ['import numpy as np\n', "import "]:
+        predictor.add(s)
+    s = predictor.get_suggestion()
 
     # Evaluate all the files in validation set
     for file in valid_files[0:]:
