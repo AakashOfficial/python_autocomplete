@@ -424,10 +424,8 @@ class InputProcessor:
                             np.array(arrays[type_idx], dtype=np.uint8))
 
     def gather_files(self, files: List[parser.load.EncodedFile]):
-        with logger.section("Counting", total_steps=len(files)):
-            for i, f in enumerate(files):
-                self.gather(f.codes)
-                logger.progress(i + 1)
+        for f in logger.iterator("Counting", files):
+            self.gather(f.codes)
 
     def transform(self, input_codes: np.ndarray):
         types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
@@ -477,10 +475,8 @@ class InputProcessor:
 
     def transform_files(self, files: List[parser.load.EncodedFile]) -> List[EncodedFile]:
         transformed = []
-        with logger.section("Transforming", total_steps=len(files)):
-            for i, f in enumerate(files):
-                transformed.append(EncodedFile(f.path, self.transform(f.codes)))
-                logger.progress(i + 1)
+        for f in logger.iterator("Transforming", files):
+            transformed.append(EncodedFile(f.path, self.transform(f.codes)))
 
         return transformed
 
@@ -519,7 +515,7 @@ class BatchBuilder:
 
         eof = np.array([eof], dtype=np.int32)
 
-        for i, f in enumerate(files):
+        for i, f in logger.enumerator("Get batches", files):
             if len(f.codes) == 0:
                 continue
 
@@ -555,7 +551,7 @@ class BatchBuilder:
         y = []
 
         idx = [batches * i for i in range(batch_size)]
-        for i in range(batches):
+        for _ in logger.iterator("Order batches", batches):
             x_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
             y_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
             for j in range(batch_size):
@@ -653,10 +649,8 @@ class BatchBuilder:
         # return [len(s) for s in sets]
 
     def build_batches(self, x: List[np.ndarray], y: List[np.ndarray]):
-        n_batches = len(x)
-
         batches: List[Batch] = []
-        for b in range(n_batches):
+        for b in logger.iterator("Build batches", len(x)):
             batches.append(self.build_batch(x[b], y[b]))
 
         return batches
@@ -762,12 +756,13 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
         # Load all python files
         files = parser.load.load_files()
 
-    files = files[:100]
+    # files = files[:100]
 
     # Transform files
-    processor = InputProcessor()
-    processor.gather_files(files)
-    files = processor.transform_files(files)
+    with logger.section("Transform files"):
+        processor = InputProcessor()
+        processor.gather_files(files)
+        files = processor.transform_files(files)
 
     with logger.section("Split training and validation"):
         # Split training and validation data
@@ -813,7 +808,7 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
     return trainer, validator, batches
 
 
-def run_epoch(epoch, model,
+def run_epoch(model,
               loss_func, encoder_decoder_loss_funcs, optimizer,
               seq_len, batch_size,
               h0, c0):
@@ -825,21 +820,19 @@ def run_epoch(epoch, model,
                                                         h0, c0)
 
     # Number of steps per epoch. We train and validate on each step.
-    steps_per_epoch = 20000
+    steps_per_epoch = 1000
 
     # Next batch to train and validation
     train_batch = 0
     valid_batch = 0
 
-    # Loop through steps
-    for i in logger.loop(range(1, steps_per_epoch)):
-        # Set global step
-        global_step = epoch * batches + min(batches, (batches * i) // steps_per_epoch)
-        logger.set_global_step(global_step)
+    is_interrupted = False
 
+    # Loop through steps
+    for i in logger.loop(range(1, steps_per_epoch + 1)):
         # Last batch to train and validate
-        train_batch_limit = len(trainer.batches) * min(1., (i + 1) / steps_per_epoch)
-        valid_batch_limit = len(validator.batches) * min(1., (i + 1) / steps_per_epoch)
+        train_batch_limit = len(trainer.batches) * min(1., i / steps_per_epoch)
+        valid_batch_limit = len(validator.batches) * min(1., i / steps_per_epoch)
 
         try:
             with logger.delayed_keyboard_interrupt():
@@ -864,19 +857,21 @@ def run_epoch(epoch, model,
                 logger.write()
 
                 # 10 lines of logs per epoch
-                if (i + 1) % (steps_per_epoch // 10) == 0:
+                if i % (steps_per_epoch // 10) == 0:
                     logger.new_line()
 
-        except KeyboardInterrupt:
-            # TODO Progress save doesn't work
-            logger.save_progress()
-            logger.save_checkpoint()
-            logger.new_line()
-            logger.finish_loop()
-            return False
+                # Set global step
+                logger.add_global_step()
 
+        except KeyboardInterrupt:
+            is_interrupted = True
+
+    logger.save_progress()
+    logger.save_checkpoint()
+    logger.new_line()
     logger.finish_loop()
-    return True
+
+    return not is_interrupted
 
 
 def create_model():
@@ -943,17 +938,19 @@ def main():
     EXPERIMENT.add_models({'base': model})
 
     # Start training scratch
-    EXPERIMENT.start_train(True)
+    EXPERIMENT.start_train(False)
 
     # Setup logger
     for t in ['train', 'valid']:
         logger.add_indicator(f"{t}_loss", queue_limit=500, is_histogram=True)
         logger.add_indicator(f"{t}_loss_main", queue_limit=500, is_histogram=True)
         for i in range(3):
-            logger.add_indicator(f"{t}_loss_enc_dec_{i}", queue_limit=500, is_histogram=True)
+            logger.add_indicator(f"{t}_loss_enc_dec_{i}", queue_limit=500,
+                                 is_print=i != 0,
+                                 is_histogram=True)
 
     for epoch in range(100):
-        if not run_epoch(epoch, model,
+        if not run_epoch(model,
                          loss_func, encoder_decoder_loss_funcs, optimizer,
                          seq_len, batch_size,
                          h0, c0):
