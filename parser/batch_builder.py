@@ -11,9 +11,8 @@ from parser.merge_tokens import InputProcessor, IdentifierInfo
 class BatchBuilder:
     def __init__(self, input_processor: InputProcessor, logger: Logger):
         self.logger = logger
-        self.infos = input_processor.infos
-        self.token_data_arrays = input_processor.arrays
-        self.freqs = [self.get_frequencies(info) for info in self.infos]
+        self.processor = input_processor
+        self.freqs = [self.get_frequencies(info) for info in self.processor.infos]
 
     @staticmethod
     def get_frequencies(info: List[IdentifierInfo]):
@@ -21,8 +20,7 @@ class BatchBuilder:
         freqs.sort(reverse=True, key=lambda x: x[1])
         return [f[0] for f in freqs]
 
-    @staticmethod
-    def get_batches(files: List[parser.load.EncodedFile],
+    def get_batches(self, files: List[parser.load.EncodedFile],
                     eof: int, batch_size: int, seq_len: int):
         """
         Covert raw encoded files into training/validation batches
@@ -107,8 +105,8 @@ class BatchBuilder:
             return res
 
         token_type -= 1
-        infos = self.infos[token_type]
-        data_array = self.token_data_arrays[token_type]
+        infos = self.processor.infos[token_type]
+        data_array = self.processor.arrays[token_type]
 
         for i, t in enumerate(tokens):
             info = infos[t]
@@ -119,7 +117,7 @@ class BatchBuilder:
     def _get_token_sets(self, x_source: np.ndarray, y_source: np.ndarray):
         seq_len, batch_size = x_source.shape
 
-        sets: List[set] = [set() for _ in range(len(self.infos) + 1)]
+        sets: List[set] = [set() for _ in range(len(self.processor.infos) + 1)]
 
         for s in range(seq_len):
             for b in range(batch_size):
@@ -131,10 +129,39 @@ class BatchBuilder:
                 c = y_source[s, b] % InputProcessor.TYPE_MASK_BASE
                 sets[type_idx].add(c)
 
-        for i in range(1, len(self.infos) + 1):
+        for i in range(1, len(self.processor.infos) + 1):
             sets[i] = sets[i].union(self.freqs[i - 1][:128])
 
         return sets
+
+    def build_infer_batch(self, x_source: np.ndarray):
+        seq_len, batch_size = x_source.shape
+
+        lists = [[]]
+        for infos in self.processor.infos:
+            lists.append([i for i in range(len(infos))])
+        lists[0] = [i for i in range(tokenizer.VOCAB_SIZE)]
+
+        dicts = [{c: i for i, c in enumerate(s)} for s in lists]
+
+        token_data = []
+        for i, length in enumerate(InputProcessor.MAX_LENGTH):
+            token_data.append(self.create_token_array(i, length, lists[i]))
+
+        x = np.zeros_like(x_source, dtype=np.int32)
+        x_type = np.zeros_like(x_source, dtype=np.int8)
+
+        for s in range(seq_len):
+            for b in range(batch_size):
+                type_idx = x_source[s, b] // InputProcessor.TYPE_MASK_BASE
+                c = x_source[s, b] % InputProcessor.TYPE_MASK_BASE
+                x[s, b] = dicts[type_idx][c]
+                x_type[s, b] = type_idx
+
+        return Batch(x, None, x_type, None, None,
+                     token_data[0],
+                     token_data[1],
+                     token_data[2])
 
     def build_batch(self, x_source: np.ndarray, y_source: np.ndarray):
         seq_len, batch_size = x_source.shape

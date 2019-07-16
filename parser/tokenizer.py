@@ -1,6 +1,8 @@
 import tokenize
 from io import BytesIO
-from typing import Optional, List, NamedTuple
+from typing import Optional, List, NamedTuple, Union
+
+import numpy as np
 
 
 class TokenType:
@@ -259,7 +261,7 @@ def encode(tokens: List[ParsedToken]) -> List[int]:
     return [_encode_token(t) for t in tokens]
 
 
-def decode(codes: List[int]) -> List[ParsedToken]:
+def decode(codes: Union[np.ndarray, List[int]]) -> List[ParsedToken]:
     """
     Decode codes to tokens
     """

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn
 
-from parser.batch_builder import Batch
+from parser.batch_builder import Batch, BatchBuilder
 from parser.load import load_files, EncodedFile, split_train_valid
 from parser.merge_tokens import InputProcessor
 import train_id
@@ -72,6 +72,7 @@ class Predictor:
         self.time_check = 0
 
         self.processor = InputProcessor(logger)
+        self.builder = BatchBuilder(self.processor, logger)
 
     def __clear_tokens(self, lines: int):
         """
@@ -189,7 +190,7 @@ class Predictor:
         x = np.array(codes_batch, dtype=np.int32)
         x = np.transpose(x, (1, 0))
 
-        batch = self.create_batch(x)
+        batch = self.builder.build_infer_batch(x)
 
         x = torch.tensor(batch.x, device=device, dtype=torch.int64)
         x_type = torch.tensor(batch.x_type, device=device, dtype=torch.int64)
@@ -438,7 +439,7 @@ class Predictor:
         x_source = np.array([x_source], dtype=np.int32)
         x_source = np.transpose(x_source, (1, 0))
 
-        batch = self.create_batch(x_source)
+        batch = self.builder.build_infer_batch(x_source)
 
         x = torch.tensor(batch.x, device=device, dtype=torch.int64)
         x_type = torch.tensor(batch.x_type, device=device, dtype=torch.int64)
@@ -453,52 +454,6 @@ class Predictor:
 
         self.h0 = out.hn.detach()
         self.c0 = out.cn.detach()
-
-    def create_token_array(self, token_type: int, length: int, tokens: list):
-        res = np.zeros((len(tokens), length), dtype=np.uint8)
-
-        if token_type == 0:
-            res[:, 0] = tokens
-            return res
-
-        token_type -= 1
-        infos = self.processor.infos[token_type]
-        data_array = self.processor.arrays[token_type]
-
-        for i, t in enumerate(tokens):
-            info = infos[t]
-            res[i, :info.length] = data_array[info.offset:info.offset + info.length]
-
-        return res
-
-    def create_batch(self, x_source: np.ndarray):
-        seq_len, batch_size = x_source.shape
-
-        lists = [[]]
-        for infos in self.processor.infos:
-            lists.append([i for i in range(len(infos))])
-        lists[0] = [i for i in range(tokenizer.VOCAB_SIZE)]
-
-        dicts = [{c: i for i, c in enumerate(s)} for s in lists]
-
-        token_data = []
-        for i, length in enumerate(InputProcessor.MAX_LENGTH):
-            token_data.append(self.create_token_array(i, length, lists[i]))
-
-        x = np.zeros_like(x_source, dtype=np.int32)
-        x_type = np.zeros_like(x_source, dtype=np.int8)
-
-        for s in range(seq_len):
-            for b in range(batch_size):
-                type_idx = x_source[s, b] // InputProcessor.TYPE_MASK_BASE
-                c = x_source[s, b] % InputProcessor.TYPE_MASK_BASE
-                x[s, b] = dicts[type_idx][c]
-                x_type[s, b] = type_idx
-
-        return Batch(x, None, x_type, None, None,
-                                          token_data[0],
-                                          token_data[1],
-                                          token_data[2])
 
 
 class Evaluator:
