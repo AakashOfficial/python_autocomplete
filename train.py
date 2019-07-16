@@ -8,7 +8,7 @@ import torch.nn
 
 import parser.load
 from lab.experiment.pytorch import Experiment
-from model import SimpleLstmModel
+from simple_model import SimpleLstmModel
 from parser import tokenizer
 
 # Configure the experiment

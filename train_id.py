@@ -348,7 +348,7 @@ class Trainer:
                  is_train: bool,
                  h0, c0):
         # Get batches
-        builder = BatchBuilder(input_processor)
+        builder = BatchBuilder(input_processor, logger)
 
         x, y = builder.get_batches(files, eof,
                                    batch_size=batch_size,

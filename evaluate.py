@@ -11,7 +11,7 @@ import parser.load
 import parser.tokenizer
 from lab import colors
 from lab.experiment.pytorch import Experiment
-from model import SimpleLstmModel
+from simple_model import SimpleLstmModel
 from parser import tokenizer
 
 # Experiment configuration to load checkpoints
