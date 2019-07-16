@@ -1,15 +1,16 @@
-from typing import List
+from typing import List, NamedTuple, Optional
 
 import numpy as np
 
 import parser.load
+from lab.logger import Logger
 from parser import tokenizer
-from parser.merge_tokens import InputProcessor, TYPE_MASK_BASE
-from train_id import IdentifierInfo, logger, MAX_LENGTH, Batch
+from parser.merge_tokens import InputProcessor, IdentifierInfo
 
 
 class BatchBuilder:
-    def __init__(self, input_processor: InputProcessor):
+    def __init__(self, input_processor: InputProcessor, logger: Logger):
+        self.logger = logger
         self.infos = input_processor.infos
         self.token_data_arrays = input_processor.arrays
         self.freqs = [self.get_frequencies(info) for info in self.infos]
@@ -42,7 +43,7 @@ class BatchBuilder:
 
         eof = np.array([eof], dtype=np.int32)
 
-        for i, f in logger.enumerator("Get batches", files):
+        for i, f in self.logger.enumerator("Get batches", files):
             if len(f.codes) == 0:
                 continue
 
@@ -78,7 +79,7 @@ class BatchBuilder:
         y = []
 
         idx = [batches * i for i in range(batch_size)]
-        for _ in logger.iterator("Order batches", batches):
+        for _ in self.logger.iterator("Order batches", batches):
             x_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
             y_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
             for j in range(batch_size):
@@ -122,12 +123,12 @@ class BatchBuilder:
 
         for s in range(seq_len):
             for b in range(batch_size):
-                type_idx = x_source[s, b] // TYPE_MASK_BASE
-                c = x_source[s, b] % TYPE_MASK_BASE
+                type_idx = x_source[s, b] // InputProcessor.TYPE_MASK_BASE
+                c = x_source[s, b] % InputProcessor.TYPE_MASK_BASE
                 sets[type_idx].add(c)
 
-                type_idx = y_source[s, b] // TYPE_MASK_BASE
-                c = y_source[s, b] % TYPE_MASK_BASE
+                type_idx = y_source[s, b] // InputProcessor.TYPE_MASK_BASE
+                c = y_source[s, b] % InputProcessor.TYPE_MASK_BASE
                 sets[type_idx].add(c)
 
         for i in range(1, len(self.infos) + 1):
@@ -144,7 +145,7 @@ class BatchBuilder:
         dicts = [{c: i for i, c in enumerate(s)} for s in lists]
 
         token_data = []
-        for i, length in enumerate(MAX_LENGTH):
+        for i, length in enumerate(InputProcessor.MAX_LENGTH):
             token_data.append(self.create_token_array(i, length, lists[i]))
 
         x = np.zeros_like(x_source, dtype=np.int32)
@@ -157,13 +158,13 @@ class BatchBuilder:
 
         for s in range(seq_len):
             for b in range(batch_size):
-                type_idx = x_source[s, b] // TYPE_MASK_BASE
-                c = x_source[s, b] % TYPE_MASK_BASE
+                type_idx = x_source[s, b] // InputProcessor.TYPE_MASK_BASE
+                c = x_source[s, b] % InputProcessor.TYPE_MASK_BASE
                 x[s, b] = dicts[type_idx][c]
                 x_type[s, b] = type_idx
 
-                type_idx = y_source[s, b] // TYPE_MASK_BASE
-                c = y_source[s, b] % TYPE_MASK_BASE
+                type_idx = y_source[s, b] // InputProcessor.TYPE_MASK_BASE
+                c = y_source[s, b] % InputProcessor.TYPE_MASK_BASE
                 y[s, b] = dicts[type_idx][c]
                 y_type[s, b] = type_idx
                 y_idx[s, b] = offset[type_idx] + dicts[type_idx][c]
@@ -177,7 +178,18 @@ class BatchBuilder:
 
     def build_batches(self, x: List[np.ndarray], y: List[np.ndarray]):
         batches: List[Batch] = []
-        for b in logger.iterator("Build batches", len(x)):
+        for b in self.logger.iterator("Build batches", len(x)):
             batches.append(self.build_batch(x[b], y[b]))
 
         return batches
+
+
+class Batch(NamedTuple):
+    x: np.ndarray
+    y: Optional[np.ndarray]
+    x_type: np.ndarray
+    y_type: Optional[np.ndarray]
+    y_idx: Optional[np.ndarray]
+    tokens: np.ndarray
+    ids: np.ndarray
+    nums: np.ndarray

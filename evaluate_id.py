@@ -7,9 +7,9 @@ import numpy as np
 import torch
 import torch.nn
 
-import parser.load
-import parser.merge_tokens
-import parser.tokenizer
+from parser.batch_builder import Batch
+from parser.load import load_files, EncodedFile, split_train_valid
+from parser.merge_tokens import InputProcessor
 import train_id
 from lab import colors
 from lab.experiment.pytorch import Experiment
@@ -71,7 +71,7 @@ class Predictor:
         self.time_predict = 0
         self.time_check = 0
 
-        self.processor = parser.merge_tokens.InputProcessor()
+        self.processor = InputProcessor(logger)
 
     def __clear_tokens(self, lines: int):
         """
@@ -245,7 +245,7 @@ class Predictor:
             for i in range(len(self.processor.infos)):
                 if code < len(self.processor.infos[i]):
                     res = self.processor.infos[i][code].string
-                    new_code = (i + 1) * parser.merge_tokens.TYPE_MASK_BASE + code
+                    new_code = (i + 1) * InputProcessor.TYPE_MASK_BASE + code
                     break
                 else:
                     code -= len(self.processor.infos[i])
@@ -277,10 +277,10 @@ class Predictor:
     def get_string_masked(self, code, prev_code) -> str:
         prev_special = False
         code_special = False
-        prev_type_idx = prev_code // parser.merge_tokens.TYPE_MASK_BASE
-        prev_code = prev_code % parser.merge_tokens.TYPE_MASK_BASE
-        type_idx = code // parser.merge_tokens.TYPE_MASK_BASE
-        code = code % parser.merge_tokens.TYPE_MASK_BASE
+        prev_type_idx = prev_code // InputProcessor.TYPE_MASK_BASE
+        prev_code = prev_code % InputProcessor.TYPE_MASK_BASE
+        type_idx = code // InputProcessor.TYPE_MASK_BASE
+        code = code % InputProcessor.TYPE_MASK_BASE
 
         if prev_type_idx == 0:
             if tokenizer.DESERIALIZE[prev_code].type == tokenizer.TokenType.keyword:
@@ -425,8 +425,8 @@ class Predictor:
         """
         Update model state
         """
-        data = parser.tokenizer.parse(in_tokens)
-        data = np.array(parser.tokenizer.encode(data))
+        data = tokenizer.parse(in_tokens)
+        data = np.array(tokenizer.encode(data))
         self.processor.gather(data)
         data = self.processor.transform(data)
 
@@ -482,7 +482,7 @@ class Predictor:
         dicts = [{c: i for i, c in enumerate(s)} for s in lists]
 
         token_data = []
-        for i, length in enumerate(train_id.MAX_LENGTH):
+        for i, length in enumerate(InputProcessor.MAX_LENGTH):
             token_data.append(self.create_token_array(i, length, lists[i]))
 
         x = np.zeros_like(x_source, dtype=np.int32)
@@ -490,20 +490,20 @@ class Predictor:
 
         for s in range(seq_len):
             for b in range(batch_size):
-                type_idx = x_source[s, b] // parser.merge_tokens.TYPE_MASK_BASE
-                c = x_source[s, b] % parser.merge_tokens.TYPE_MASK_BASE
+                type_idx = x_source[s, b] // InputProcessor.TYPE_MASK_BASE
+                c = x_source[s, b] % InputProcessor.TYPE_MASK_BASE
                 x[s, b] = dicts[type_idx][c]
                 x_type[s, b] = type_idx
 
-        return train_id.Batch(x, None, x_type, None, None,
-                              token_data[0],
-                              token_data[1],
-                              token_data[2])
+        return Batch(x, None, x_type, None, None,
+                                          token_data[0],
+                                          token_data[1],
+                                          token_data[2])
 
 
 class Evaluator:
-    def __init__(self, model, file: parser.load.EncodedFile,
-                 sample: parser.load.EncodedFile,
+    def __init__(self, model, file: EncodedFile,
+                 sample: EncodedFile,
                  skip_spaces=False):
         self.__content = self.get_content(file.codes)
         self.__skip_spaces = skip_spaces
@@ -512,8 +512,8 @@ class Evaluator:
 
     @staticmethod
     def get_content(codes: np.ndarray):
-        tokens = parser.tokenizer.decode(codes)
-        content = parser.tokenizer.to_string(tokens)
+        tokens = tokenizer.decode(codes)
+        content = tokenizer.to_string(tokens)
         return content.split('\n')
 
     def eval(self):
@@ -586,8 +586,8 @@ class Evaluator:
 
 def main():
     with logger.section("Loading data"):
-        files = parser.load.load_files()
-        train_files, valid_files = parser.load.split_train_valid(files, is_shuffle=False)
+        files = load_files()
+        train_files, valid_files = split_train_valid(files, is_shuffle=False)
 
     with logger.section("Create model"):
         model = train_id.create_model()

@@ -8,11 +8,10 @@ TODO: Needs a complete rewrite from tokenizer level
 import math
 from typing import List, Optional, NamedTuple
 
-import numpy as np
 import torch
 import torch.nn
 
-import parser.load
+from parser.load import EncodedFile, split_train_valid, load_files
 from lab.experiment.pytorch import Experiment
 from parser import tokenizer
 
@@ -33,17 +32,6 @@ device = torch.device("cuda:1")
 cpu = torch.device("cpu")
 
 
-class Batch(NamedTuple):
-    x: np.ndarray
-    y: Optional[np.ndarray]
-    x_type: np.ndarray
-    y_type: Optional[np.ndarray]
-    y_idx: Optional[np.ndarray]
-    tokens: np.ndarray
-    ids: np.ndarray
-    nums: np.ndarray
-
-
 class ModelOutput(NamedTuple):
     decoded_input_logits: torch.Tensor
     decoded_predictions: Optional[torch.Tensor]
@@ -51,21 +39,6 @@ class ModelOutput(NamedTuple):
     logits: torch.Tensor
     hn: torch.Tensor
     cn: torch.Tensor
-
-
-class IdentifierInfo:
-    code: int
-    count: int
-    offset: int
-    length: int
-    string: str
-
-    def __init__(self, code, offset, length, string):
-        self.code = code
-        self.count = 1
-        self.offset = offset
-        self.length = length
-        self.string = string
 
 
 class LstmEncoder(torch.nn.Module):
@@ -212,9 +185,6 @@ class EmbeddingsDecoder(torch.nn.Module):
         return self.softmax(logits), logits
 
 
-MAX_LENGTH = [1, 80, 25]
-
-
 class Model(torch.nn.Module):
     def __init__(self, *,
                  encoder_ids: LstmEncoder,
@@ -280,7 +250,7 @@ class Model(torch.nn.Module):
         encoders = [self.encoder_tokens, self.encoder_ids, self.encoder_nums]
         decoders = [self.decoder_tokens, self.decoder_ids, self.decoder_nums]
         for i, d in enumerate(decoders):
-            d.length = MAX_LENGTH[i]
+            d.length = InputProcessor.MAX_LENGTH[i]
 
         inputs = [tokens, ids, nums]
         n_inputs = len(inputs)
@@ -369,7 +339,7 @@ class Trainer:
     This will maintain states, data and train/validate the model
     """
 
-    def __init__(self, *, files: List[parser.load.EncodedFile],
+    def __init__(self, *, files: List[EncodedFile],
                  input_processor: InputProcessor,
                  model: Model,
                  loss_func, encoder_decoder_loss_funcs, optimizer,
@@ -462,19 +432,19 @@ def get_trainer_validator(model, loss_func, encoder_decoder_loss_funcs,
                           optimizer, seq_len, batch_size, h0, c0):
     with logger.section("Loading data"):
         # Load all python files
-        files = parser.load.load_files()
+        files = load_files()
 
     # files = files[:100]
 
     # Transform files
     with logger.section("Transform files"):
-        processor = InputProcessor()
+        processor = InputProcessor(logger)
         processor.gather_files(files)
         files = processor.transform_files(files)
 
     with logger.section("Split training and validation"):
         # Split training and validation data
-        train_files, valid_files = parser.load.split_train_valid(files, is_shuffle=False)
+        train_files, valid_files = split_train_valid(files, is_shuffle=False)
 
     # Number of batches per epoch
     batches = math.ceil(sum([len(f[1]) + 1 for f in train_files]) / (batch_size * seq_len))
@@ -645,7 +615,6 @@ def main():
     # Specify the model in [lab](https://github.com/vpj/lab) for saving and loading
     EXPERIMENT.add_models({'base': model})
 
-    # Start training scratch
     EXPERIMENT.start_train(False)
 
     # Setup logger

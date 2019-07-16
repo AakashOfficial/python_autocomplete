@@ -2,18 +2,21 @@ from typing import List, Dict, Optional
 
 import numpy as np
 
-import parser.load
+from lab.logger import Logger
 from parser import tokenizer
 from parser.load import EncodedFile
-from train_id import IdentifierInfo, logger
 
 
 class InputProcessor:
     """
     TODO: We should do this at tokenizer level
     """
+    TYPE_MASK_BASE = 1 << 20
+    MAX_LENGTH = [1, 80, 25]
 
-    def __init__(self):
+    def __init__(self, logger: Logger):
+        self.logger = logger
+
         self.infos: List[List[IdentifierInfo]] = [[], []]
         self.dictionaries: List[Dict[str, int]] = [{} for _ in self.infos]
         self.arrays: List[np.ndarray] = [np.array([], dtype=np.uint8) for _ in self.infos]
@@ -66,8 +69,8 @@ class InputProcessor:
                 self._add_to(type_idx, strings[type_idx],
                              np.array(arrays[type_idx], dtype=np.uint8))
 
-    def gather_files(self, files: List[parser.load.EncodedFile]):
-        for f in logger.iterator("Counting", files):
+    def gather_files(self, files: List[EncodedFile]):
+        for f in self.logger.iterator("Counting", files):
             self.gather(f.codes)
 
     def transform(self, input_codes: np.ndarray):
@@ -112,16 +115,28 @@ class InputProcessor:
 
         codes = np.array(codes, dtype=np.int32)
         type_mask = np.array(type_mask, dtype=np.int32)
-        codes = type_mask * TYPE_MASK_BASE + codes
+        codes = type_mask * self.TYPE_MASK_BASE + codes
 
         return codes
 
-    def transform_files(self, files: List[parser.load.EncodedFile]) -> List[EncodedFile]:
+    def transform_files(self, files: List[EncodedFile]) -> List[EncodedFile]:
         transformed = []
-        for f in logger.iterator("Transforming", files):
+        for f in self.logger.iterator("Transforming", files):
             transformed.append(EncodedFile(f.path, self.transform(f.codes)))
 
         return transformed
 
 
-TYPE_MASK_BASE = 1 << 20
+class IdentifierInfo:
+    code: int
+    count: int
+    offset: int
+    length: int
+    string: str
+
+    def __init__(self, code, offset, length, string):
+        self.code = code
+        self.count = 1
+        self.offset = offset
+        self.length = length
+        self.string = string

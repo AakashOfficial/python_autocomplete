@@ -5,7 +5,7 @@ import torch.nn
 
 import lab.embeddings
 import parser.load
-import parser.merge_tokens
+from parser.merge_tokens import InputProcessor
 import train_id
 from lab.experiment.pytorch import Experiment
 
@@ -57,7 +57,7 @@ def main():
 
     EXPERIMENT.start_replay()
 
-    processor = parser.merge_tokens.InputProcessor()
+    processor = InputProcessor(logger)
     processor.gather_files(train_files)
 
     id_list = [i for i in range(len(processor.infos[0]))]
@@ -65,7 +65,7 @@ def main():
     ids = create_token_array(processor, 1, 80, id_list)
     ids = torch.tensor(ids, dtype=torch.int64, device=device)
     embeddings = model.encoder_ids(ids)
-    model.decoder_ids.length = train_id.MAX_LENGTH[1]
+    model.decoder_ids.length = InputProcessor.MAX_LENGTH[1]
     decoded, _ = model.decoder_ids(embeddings[:120])
     decoded = decoded.argmax(dim=-1)
     embeddings = embeddings.detach().cpu().numpy()
