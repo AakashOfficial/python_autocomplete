@@ -8,6 +8,7 @@ import torch
 import torch.nn
 
 import parser.load
+import parser.merge_tokens
 import parser.tokenizer
 import train_id
 from lab import colors
@@ -70,7 +71,7 @@ class Predictor:
         self.time_predict = 0
         self.time_check = 0
 
-        self.processor = train_id.InputProcessor()
+        self.processor = parser.merge_tokens.InputProcessor()
 
     def __clear_tokens(self, lines: int):
         """
@@ -244,7 +245,7 @@ class Predictor:
             for i in range(len(self.processor.infos)):
                 if code < len(self.processor.infos[i]):
                     res = self.processor.infos[i][code].string
-                    new_code = (i + 1) * train_id.TYPE_MASK_BASE + code
+                    new_code = (i + 1) * parser.merge_tokens.TYPE_MASK_BASE + code
                     break
                 else:
                     code -= len(self.processor.infos[i])
@@ -276,10 +277,10 @@ class Predictor:
     def get_string_masked(self, code, prev_code) -> str:
         prev_special = False
         code_special = False
-        prev_type_idx = prev_code // train_id.TYPE_MASK_BASE
-        prev_code = prev_code % train_id.TYPE_MASK_BASE
-        type_idx = code // train_id.TYPE_MASK_BASE
-        code = code % train_id.TYPE_MASK_BASE
+        prev_type_idx = prev_code // parser.merge_tokens.TYPE_MASK_BASE
+        prev_code = prev_code % parser.merge_tokens.TYPE_MASK_BASE
+        type_idx = code // parser.merge_tokens.TYPE_MASK_BASE
+        code = code % parser.merge_tokens.TYPE_MASK_BASE
 
         if prev_type_idx == 0:
             if tokenizer.DESERIALIZE[prev_code].type == tokenizer.TokenType.keyword:
@@ -489,8 +490,8 @@ class Predictor:
 
         for s in range(seq_len):
             for b in range(batch_size):
-                type_idx = x_source[s, b] // train_id.TYPE_MASK_BASE
-                c = x_source[s, b] % train_id.TYPE_MASK_BASE
+                type_idx = x_source[s, b] // parser.merge_tokens.TYPE_MASK_BASE
+                c = x_source[s, b] % parser.merge_tokens.TYPE_MASK_BASE
                 x[s, b] = dicts[type_idx][c]
                 x_type[s, b] = type_idx
 

@@ -6,18 +6,19 @@ TODO: Needs a complete rewrite from tokenizer level
 """
 
 import math
-from typing import List, Optional, NamedTuple, Dict
+from typing import List, Optional, NamedTuple
 
 import numpy as np
 import torch
 import torch.nn
 
 import parser.load
-from parser.load import EncodedFile
 from lab.experiment.pytorch import Experiment
 from parser import tokenizer
 
 # Configure the experiment
+from parser.batch_builder import BatchBuilder
+from parser.merge_tokens import InputProcessor
 
 EXPERIMENT = Experiment(name="id_embeddings",
                         python_file=__file__,
@@ -30,8 +31,6 @@ logger = EXPERIMENT.logger
 # device to train on
 device = torch.device("cuda:1")
 cpu = torch.device("cpu")
-
-TYPE_MASK_BASE = 1 << 20
 
 
 class Batch(NamedTuple):
@@ -363,297 +362,6 @@ class Model(torch.nn.Module):
 
         return ModelOutput(decoded_input_logits, decoded_prediction,
                            probabilities, logits, hn, cn)
-
-
-class InputProcessor:
-    """
-    TODO: We should do this at tokenizer level
-    """
-
-    def __init__(self):
-        self.infos: List[List[IdentifierInfo]] = [[], []]
-        self.dictionaries: List[Dict[str, int]] = [{} for _ in self.infos]
-        self.arrays: List[np.ndarray] = [np.array([], dtype=np.uint8) for _ in self.infos]
-        self.counts: List[int] = [0 for _ in self.infos]
-        types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
-        # -1 because this is used right now for decoding,
-        # and we've added 1 since 0 is used for padding
-        self.offsets: List[int] = [0] + [tokenizer.get_vocab_offset(t) - 1 for t in types]
-
-    def add_to(self, type_idx: int, key: str, arr: np.ndarray):
-        idx = self.dictionaries[type_idx]
-        infos: List[IdentifierInfo] = self.infos[type_idx]
-        data_array = self.arrays[type_idx]
-
-        if key in idx:
-            infos[idx[key]].count += 1
-            return
-
-        idx[key] = len(infos)
-        infos.append(IdentifierInfo(len(infos), len(data_array), len(arr), key))
-
-        self.arrays[type_idx] = np.concatenate((data_array, arr), axis=0)
-
-    def gather(self, input_codes: np.ndarray):
-        types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
-        offsets: List[int] = [tokenizer.get_vocab_offset(t) for t in types]
-        strings: List[Optional[str]] = [None for _ in types]
-        arrays: List[List[int]] = [[] for _ in types]
-
-        for c in input_codes:
-            t = tokenizer.DESERIALIZE[c]
-            for type_idx, token_type in enumerate(types):
-                if t.type != token_type:
-                    if strings[type_idx] is not None:
-                        self.add_to(type_idx, strings[type_idx],
-                                    np.array(arrays[type_idx], dtype=np.uint8))
-                        strings[type_idx] = None
-                        arrays[type_idx] = []
-                else:
-                    ch = tokenizer.DECODE[c][0]
-                    # add one because 0 is for padding
-                    arrays[type_idx].append(c + 1 - offsets[type_idx])
-                    if strings[type_idx] is None:
-                        strings[type_idx] = ch
-                    else:
-                        strings[type_idx] += ch
-
-        for type_idx, _ in enumerate(types):
-            if strings[type_idx] is not None:
-                self.add_to(type_idx, strings[type_idx],
-                            np.array(arrays[type_idx], dtype=np.uint8))
-
-    def gather_files(self, files: List[parser.load.EncodedFile]):
-        for f in logger.iterator("Counting", files):
-            self.gather(f.codes)
-
-    def transform(self, input_codes: np.ndarray):
-        types = [tokenizer.TokenType.name, tokenizer.TokenType.number]
-        strings: List[Optional[str]] = [None for _ in types]
-
-        type_mask = []
-        codes = []
-
-        for c in input_codes:
-            t = tokenizer.DESERIALIZE[c]
-            skip = False
-            for type_idx, token_type in enumerate(types):
-                if t.type != token_type:
-                    if strings[type_idx] is not None:
-                        type_mask.append(type_idx + 1)
-                        idx = self.dictionaries[type_idx][strings[type_idx]]
-                        codes.append(self.infos[type_idx][idx].code)
-                        strings[type_idx] = None
-                else:
-                    ch = tokenizer.DECODE[c][0]
-                    # add one because 0 is for padding
-                    if strings[type_idx] is None:
-                        strings[type_idx] = ch
-                    else:
-                        strings[type_idx] += ch
-
-                    skip = True
-
-            if skip:
-                continue
-
-            type_mask.append(0)
-            codes.append(c)
-
-        for type_idx, token_type in enumerate(types):
-            if strings[type_idx] is not None:
-                type_mask.append(type_idx + 1)
-                idx = self.dictionaries[type_idx][strings[type_idx]]
-                codes.append(self.infos[type_idx][idx].code)
-                strings[type_idx] = None
-
-        codes = np.array(codes, dtype=np.int32)
-        type_mask = np.array(type_mask, dtype=np.int32)
-        codes = type_mask * TYPE_MASK_BASE + codes
-
-        return codes
-
-    def transform_files(self, files: List[parser.load.EncodedFile]) -> List[EncodedFile]:
-        transformed = []
-        for f in logger.iterator("Transforming", files):
-            transformed.append(EncodedFile(f.path, self.transform(f.codes)))
-
-        return transformed
-
-
-class BatchBuilder:
-    def __init__(self, input_processor: InputProcessor):
-        self.infos = input_processor.infos
-        self.token_data_arrays = input_processor.arrays
-        self.freqs = [self.get_frequencies(info) for info in self.infos]
-
-    @staticmethod
-    def get_frequencies(info: List[IdentifierInfo]):
-        freqs = [(i.code, i.count) for i in info]
-        freqs.sort(reverse=True, key=lambda x: x[1])
-        return [f[0] for f in freqs]
-
-    @staticmethod
-    def get_batches(files: List[parser.load.EncodedFile],
-                    eof: int, batch_size: int, seq_len: int):
-        """
-        Covert raw encoded files into training/validation batches
-        """
-
-        # Shuffle the order of files
-        np.random.shuffle(files)
-
-        # Start from a random offset
-        offset = np.random.randint(seq_len * batch_size)
-
-        x_unordered = []
-        y_unordered = []
-
-        # Concatenate all the files whilst adding `eof` marker at the beginnings
-        data = []
-        last_clean = 0
-
-        eof = np.array([eof], dtype=np.int32)
-
-        for i, f in logger.enumerator("Get batches", files):
-            if len(f.codes) == 0:
-                continue
-
-            # To make sure data type in int
-            if len(data) > 0:
-                data = np.concatenate((data, eof, f.codes), axis=0)
-            else:
-                data = np.concatenate((eof, f.codes), axis=0)
-            if len(data) <= offset:
-                continue
-            data = data[offset:]
-            offset = 0
-
-            while len(data) >= batch_size * seq_len + 1:
-                x_batch = data[:(batch_size * seq_len)]
-                data = data[1:]
-                y_batch = data[:(batch_size * seq_len)]
-                data = data[(batch_size * seq_len):]
-                if i - last_clean > 100:
-                    data = np.copy(data)
-                    last_clean = i
-
-                x_batch = np.reshape(x_batch, (batch_size, seq_len))
-                y_batch = np.reshape(y_batch, (batch_size, seq_len))
-                x_unordered.append(x_batch)
-                y_unordered.append(y_batch)
-
-        del files
-        del data
-
-        batches = len(x_unordered)
-        x = []
-        y = []
-
-        idx = [batches * i for i in range(batch_size)]
-        for _ in logger.iterator("Order batches", batches):
-            x_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
-            y_batch = np.zeros((batch_size, seq_len), dtype=np.int32)
-            for j in range(batch_size):
-                n = idx[j] // batch_size
-                m = idx[j] % batch_size
-                idx[j] += 1
-                x_batch[j, :] = x_unordered[n][m, :]
-                y_batch[j, :] = y_unordered[n][m, :]
-
-            x_batch = np.transpose(x_batch, (1, 0))
-            y_batch = np.transpose(y_batch, (1, 0))
-            x.append(x_batch)
-            y.append(y_batch)
-
-        del x_unordered
-        del y_unordered
-
-        return x, y
-
-    def create_token_array(self, token_type: int, length: int, tokens: list):
-        res = np.zeros((len(tokens), length), dtype=np.uint8)
-
-        if token_type == 0:
-            res[:, 0] = tokens
-            return res
-
-        token_type -= 1
-        infos = self.infos[token_type]
-        data_array = self.token_data_arrays[token_type]
-
-        for i, t in enumerate(tokens):
-            info = infos[t]
-            res[i, :info.length] = data_array[info.offset:info.offset + info.length]
-
-        return res
-
-    def _get_token_sets(self, x_source: np.ndarray, y_source: np.ndarray):
-        seq_len, batch_size = x_source.shape
-
-        sets: List[set] = [set() for _ in range(len(self.infos) + 1)]
-
-        for s in range(seq_len):
-            for b in range(batch_size):
-                type_idx = x_source[s, b] // TYPE_MASK_BASE
-                c = x_source[s, b] % TYPE_MASK_BASE
-                sets[type_idx].add(c)
-
-                type_idx = y_source[s, b] // TYPE_MASK_BASE
-                c = y_source[s, b] % TYPE_MASK_BASE
-                sets[type_idx].add(c)
-
-        for i in range(1, len(self.infos) + 1):
-            sets[i] = sets[i].union(self.freqs[i - 1][:128])
-
-        return sets
-
-    def build_batch(self, x_source: np.ndarray, y_source: np.ndarray):
-        seq_len, batch_size = x_source.shape
-
-        lists = [list(s) for s in self._get_token_sets(x_source, y_source)]
-        lists[0] = [i for i in range(tokenizer.VOCAB_SIZE)]
-
-        dicts = [{c: i for i, c in enumerate(s)} for s in lists]
-
-        token_data = []
-        for i, length in enumerate(MAX_LENGTH):
-            token_data.append(self.create_token_array(i, length, lists[i]))
-
-        x = np.zeros_like(x_source, dtype=np.int32)
-        x_type = np.zeros_like(x_source, dtype=np.int8)
-        y = np.zeros_like(y_source, dtype=np.int32)
-        y_type = np.zeros_like(y_source, dtype=np.int8)
-        y_idx = np.zeros_like(y_source, dtype=np.int32)
-
-        offset = np.cumsum([0] + [len(s) for s in lists])
-
-        for s in range(seq_len):
-            for b in range(batch_size):
-                type_idx = x_source[s, b] // TYPE_MASK_BASE
-                c = x_source[s, b] % TYPE_MASK_BASE
-                x[s, b] = dicts[type_idx][c]
-                x_type[s, b] = type_idx
-
-                type_idx = y_source[s, b] // TYPE_MASK_BASE
-                c = y_source[s, b] % TYPE_MASK_BASE
-                y[s, b] = dicts[type_idx][c]
-                y_type[s, b] = type_idx
-                y_idx[s, b] = offset[type_idx] + dicts[type_idx][c]
-
-        return Batch(x, y, x_type, y_type, y_idx,
-                     token_data[0],
-                     token_data[1],
-                     token_data[2])
-
-        # return [len(s) for s in sets]
-
-    def build_batches(self, x: List[np.ndarray], y: List[np.ndarray]):
-        batches: List[Batch] = []
-        for b in logger.iterator("Build batches", len(x)):
-            batches.append(self.build_batch(x[b], y[b]))
-
-        return batches
 
 
 class Trainer:

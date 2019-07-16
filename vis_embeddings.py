@@ -5,6 +5,7 @@ import torch.nn
 
 import lab.embeddings
 import parser.load
+import parser.merge_tokens
 import train_id
 from lab.experiment.pytorch import Experiment
 
@@ -56,7 +57,7 @@ def main():
 
     EXPERIMENT.start_replay()
 
-    processor = train_id.InputProcessor()
+    processor = parser.merge_tokens.InputProcessor()
     processor.gather_files(train_files)
 
     id_list = [i for i in range(len(processor.infos[0]))]
